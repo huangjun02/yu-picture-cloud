@@ -19,3 +19,33 @@ spring:
       port: 6379
       database: 0
       timeout: 5000ms
+
+mybatis-plus:
+  configuration:
+    # 数据库字段 user_account (下划线) → Java 字段 userAccount (驼峰)，自动映射
+    map-underscore-to-camel-case: true
+  global-config:
+    db-config:
+      # 逻辑删除：不真删数据，只把 isDelete 从 0 改成 1
+      logic-delete-field: isDelete
+      logic-delete-value: 1
+      logic-not-delete-value: 0
+
+sa-token:
+  token-name: satoken
+  timeout: 2592000
+  is-concurrent: true
+  is-share: false
+  token-style: uuid
+
+knife4j:
+  enable: true
+  openapi:
+    title: 云图库接口文档
+    version: 1.0
+    group:
+      default:
+        group-name: 默认分组
+        api-rule: package
+        api-rule-resources:
+          - com.huang.yupicture.controller
