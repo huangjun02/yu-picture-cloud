@@ -70,11 +70,29 @@
             <artifactId>sa-token-spring-boot3-starter</artifactId>
             <version>${sa-token.version}</version>
         </dependency>
+        <!--
+            ⛔ 暂时停用 Sa-Token 的 Redis 会话存储，原因如下：
+
+            本机 Redis 是 3.0.504（Windows 移植版的最后一版，2016 年停更）。
+            Spring Boot 3.5 配套的 spring-data-redis 3.5 + Lettuce 6.x 在「带过期时间的 SET」上
+            下发的是 `SET key value EXAT <绝对毫秒>`（老语法是 `EX <秒>`），
+            而 EXAT（Redis 6.2+）/ KEEPTTL（Redis 6.0+）在 3.0 上直接回 `ERR syntax error`
+            → 登录写会话失败 → 接口返回 50000。实测堆栈：
+              RedisSystemException: Error in execution → RedisCommandExecutionException: ERR syntax error
+
+            处置：先退回 Sa-Token 自带的内存存储 —— 登录态存在后端进程内存里，
+            重启后需重新登录；单机学习完全够用。
+
+            要恢复 Redis 持久化：把 Redis 升到 6.2+（Memurai / WSL2 里的 redis / Docker 的 redis:7 都行），
+            然后把下面这段依赖放开即可，无需改代码。
+        -->
+        <!--
         <dependency>
             <groupId>cn.dev33</groupId>
             <artifactId>sa-token-redis-jackson</artifactId>
             <version>${sa-token.version}</version>
         </dependency>
+        -->
 
         <!-- 接口文档：openapi3 + jakarta 版 -->
         <dependency>
