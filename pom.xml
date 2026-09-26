@@ -70,29 +70,25 @@
             <artifactId>sa-token-spring-boot3-starter</artifactId>
             <version>${sa-token.version}</version>
         </dependency>
-        <!--
-            ⛔ 暂时停用 Sa-Token 的 Redis 会话存储，原因如下：
+        <!-- Sa-Token 的 Redis 会话存储（2026-09-27 启用）
+             ============================================================
+             背景：原先本机只有 Redis 3.0.504（Windows 移植版末版，2016 停更），
+             它不认 spring-data-redis 3.5 下发的 `SET ... EXAT <绝对毫秒>`
+             （EXAT 需 Redis 6.2+）→ `ERR syntax error` → 写会话失败、登录返回 50000。
 
-            本机 Redis 是 3.0.504（Windows 移植版的最后一版，2016 年停更）。
-            Spring Boot 3.5 配套的 spring-data-redis 3.5 + Lettuce 6.x 在「带过期时间的 SET」上
-            下发的是 `SET key value EXAT <绝对毫秒>`（老语法是 `EX <秒>`），
-            而 EXAT（Redis 6.2+）/ KEEPTTL（Redis 6.0+）在 3.0 上直接回 `ERR syntax error`
-            → 登录写会话失败 → 接口返回 50000。实测堆栈：
-              RedisSystemException: Error in execution → RedisCommandExecutionException: ERR syntax error
+             现状：已装 Redis 8.10.2（redis-windows 编译版，cygwin + Service 包），
+             跑在 **6380** 端口 —— 旧 3.0.504 仍以 Windows 服务占着 6379，
+             腾端口要管理员权限，故本项目改连 6380（application.yml 已同步）。
+             实测 8.10.2 上 `SET k v EXAT <ts>` → OK。
 
-            处置：先退回 Sa-Token 自带的内存存储 —— 登录态存在后端进程内存里，
-            重启后需重新登录；单机学习完全够用。
-
-            要恢复 Redis 持久化：把 Redis 升到 6.2+（Memurai / WSL2 里的 redis / Docker 的 redis:7 都行），
-            然后把下面这段依赖放开即可，无需改代码。
+             效果：登录态 / token 落 Redis，后端重启不掉登录；退回内存存储则重启即失效。
+             详见 docs/redis-upgrade.md
         -->
-        <!--
         <dependency>
             <groupId>cn.dev33</groupId>
             <artifactId>sa-token-redis-jackson</artifactId>
             <version>${sa-token.version}</version>
         </dependency>
-        -->
 
         <!-- 接口文档：openapi3 + jakarta 版 -->
         <dependency>
