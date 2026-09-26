@@ -16,10 +16,10 @@ spring:
   data:
     redis:
       host: localhost
-      # 6380：本机跑的是新装的 Redis 8.10.2（旧 3.0.504 仍以 Windows 服务占着 6379，
-      # 腾端口需要管理员权限）。6379 那台不支持 EXAT，Sa-Token 写会话会直接失败。
+      # 6379 = 本机 Redis 服务（2026-09-27 已从 3.0.504 升级为 8.10.2，Windows 服务、开机自启）。
+      # 旧 3.0.504 不支持 EXAT（`SET k v EXAT <ts>` 直接 ERR syntax error），Sa-Token 写会话会失败 → 登录 50000。
       # 详见 docs/redis-upgrade.md
-      port: 6380
+      port: 6379
       database: 0
       timeout: 5000ms
 

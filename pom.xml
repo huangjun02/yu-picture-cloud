@@ -76,9 +76,9 @@
              它不认 spring-data-redis 3.5 下发的 `SET ... EXAT <绝对毫秒>`
              （EXAT 需 Redis 6.2+）→ `ERR syntax error` → 写会话失败、登录返回 50000。
 
-             现状：已装 Redis 8.10.2（redis-windows 编译版，cygwin + Service 包），
-             跑在 **6380** 端口 —— 旧 3.0.504 仍以 Windows 服务占着 6379，
-             腾端口要管理员权限，故本项目改连 6380（application.yml 已同步）。
+             现状：本机 Redis 已升级为 **8.10.2**（redis-windows 编译版，cygwin + Service 包），
+             以 Windows 服务形式跑在标准端口 **6379**、开机自启
+             （原 3.0.504 的旧服务已停用并删除注册，旧程序文件仍留在 C:\Program Files\Redis 可回退）。
              实测 8.10.2 上 `SET k v EXAT <ts>` → OK。
 
              效果：登录态 / token 落 Redis，后端重启不掉登录；退回内存存储则重启即失效。
