@@ -22,8 +22,14 @@ spring:
 
 mybatis-plus:
   configuration:
-    # 数据库字段 user_account (下划线) → Java 字段 userAccount (驼峰)，自动映射
-    map-underscore-to-camel-case: true
+    # 必须 false —— 这个开关在 MyBatis-Plus 里是"双向"的：
+    #   ① 结果集映射：列 user_account → 属性 userAccount
+    #   ② 反推列名：属性 userAccount → 列名 user_account   ← 坑在这
+    # 本项目 DDL 的列名本身就是驼峰（userAccount），一旦开成 true，
+    # MP 会拿 user_account 去查库 → java.sql.SQLSyntaxErrorException: Unknown column 'user_account'
+    # 源码位置：TableInfo#underCamel = configuration.isMapUnderscoreToCamelCase()
+    #           TableInfoHelper: if (underCamel) column = StringUtils.camelToUnderline(column)
+    map-underscore-to-camel-case: false
   global-config:
     db-config:
       # 逻辑删除：不真删数据，只把 isDelete 从 0 改成 1
