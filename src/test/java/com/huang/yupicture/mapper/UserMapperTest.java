@@ -1,5 +1,6 @@
 package com.huang.yupicture.mapper;
 
+import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.huang.yupicture.model.entity.User;
 import org.junit.jupiter.api.Assertions;
@@ -89,7 +90,11 @@ class UserMapperTest {
             userMapper.insert(newUser("t_page_" + i));
         }
 
-        Page<User> page = userMapper.selectPage(new Page<>(1, 2), null);
+        // ⚠️ 这里必须带过滤条件。不带条件时统计的是「全表行数」，
+        // 库里只要存在任何别的数据（比如本地联调用的种子用户 huangjun），
+        // total 就不再是 3 —— 测试会莫名其妙失败。测试只该认自己造的数据。
+        Page<User> page = userMapper.selectPage(new Page<>(1, 2),
+                new LambdaQueryWrapper<User>().likeRight(User::getUserAccount, "t_page_"));
 
         Assertions.assertEquals(3, page.getTotal(), "total 不对 → 分页插件没生效");
         Assertions.assertEquals(2, page.getRecords().size(), "records 不对 → 分页插件没生效");
