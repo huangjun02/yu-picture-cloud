@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper
+        PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!--
+  位置很关键：MyBatis-Plus 默认只扫 classpath*:/mapper/**/*.xml，
+  所以文件必须放在 src/main/resources/mapper/ 下（放 resources 根目录不会被加载，且静默无提示）。
+  namespace 必须与 Mapper 接口全限定名一字不差，否则启动报 "Invalid bound statement"。
+-->
+<mapper namespace="com.huang.yupicture.mapper.UserMapper">
+
+    <!-- 数据库列（column，驼峰）↔ Java 字段（property，驼峰）一一对应 -->
+    <resultMap id="BaseResultMap" type="com.huang.yupicture.model.entity.User">
+        <id property="id" column="id"/>
+        <result property="userAccount" column="userAccount"/>
+        <result property="userPassword" column="userPassword"/>
+        <result property="userName" column="userName"/>
+        <result property="userAvatar" column="userAvatar"/>
+        <result property="userProfile" column="userProfile"/>
+        <result property="userRole" column="userRole"/>
+        <result property="createTime" column="createTime"/>
+        <result property="updateTime" column="updateTime"/>
+        <result property="isDelete" column="isDelete"/>
+    </resultMap>
+
+    <!-- 通用查询字段列表，供后续自定义 SQL 用 <include refid="Base_Column_List"/> 引用 -->
+    <sql id="Base_Column_List">
+        id, userAccount, userPassword, userName, userAvatar, userProfile,
+        userRole, createTime, updateTime, isDelete
+    </sql>
+
+</mapper>
