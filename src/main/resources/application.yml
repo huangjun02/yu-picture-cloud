@@ -43,6 +43,12 @@ sa-token:
   is-concurrent: true
   is-share: false
   token-style: uuid
+  # cookie 安全属性：
+  #   http-only = true → JS 读不到 token（防 XSS 直接偷登录态），但浏览器仍会自动携带它。
+  #   本项目靠 axios 的 withCredentials 自动带 cookie，前端不需要读，开了没有副作用。
+  #   same-site 保持默认 Lax，能挡掉大部分跨站表单提交（基础 CSRF 防护）。
+  cookie:
+    http-only: true
 
 knife4j:
   enable: true
