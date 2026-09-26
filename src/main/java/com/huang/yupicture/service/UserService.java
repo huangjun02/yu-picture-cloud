@@ -34,6 +34,11 @@ public interface UserService extends IService<User> {
     User getLoginUser();
 
     /**
+     * 退出登录：注销服务端会话。
+     */
+    void userLogout();
+
+    /**
      * 实体 → 脱敏 VO。
      *
      * <p>单独抽出来的原因：转化规则散在 Controller 里迟早会漏，

@@ -50,6 +50,19 @@ public class UserController {
     }
 
     /**
+     * 退出登录。
+     *
+     * <p>Sa-Token 注销服务端会话，并在响应里把 satoken cookie 置空；
+     * 前端再清掉本地缓存的用户信息，整条链路就干净了。
+     */
+    @PostMapping("/logout")
+    @Operation(summary = "用户退出登录")
+    public BaseResponse<Boolean> userLogout() {
+        userService.userLogout();
+        return ResultUtils.success(true);
+    }
+
+    /**
      * 获取当前登录用户。
      *
      * <p>不带 cookie 请求它会得到 {@code {"code":40100,...,"message":"未登录"}} ——

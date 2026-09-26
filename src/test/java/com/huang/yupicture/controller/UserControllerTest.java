@@ -130,6 +130,30 @@ class UserControllerTest {
     }
 
     @Test
+    @Transactional
+    void logoutShouldInvalidateSession() throws Exception {
+        String account = "ut_logout";
+
+        MvcResult loginResult = mockMvc.perform(post("/user/login")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"userAccount\":\"" + prepareUser(account) + "\",\"userPassword\":\"" + RAW_PASSWORD + "\"}"))
+                .andExpect(jsonPath("$.code").value(0))
+                .andReturn();
+
+        Cookie cookie = loginResult.getResponse().getCookie("satoken");
+        assertNotNull(cookie);
+
+        mockMvc.perform(post("/user/logout").cookie(cookie))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(0));
+
+        // 拿退出前的旧 cookie 再问「我是谁」→ 服务端会话已注销，必须被拒
+        mockMvc.perform(get("/user/get/login").cookie(cookie))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(40100));
+    }
+
+    @Test
     void getLoginUserWithoutCookieShouldBeRejected() throws Exception {
         // 计划里的验收点：不带头/不带 cookie 必须被拦
         mockMvc.perform(get("/user/get/login"))

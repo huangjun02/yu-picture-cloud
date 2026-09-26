@@ -74,6 +74,12 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
     }
 
     @Override
+    public void userLogout() {
+        // 幂等：未登录 / 会话已过期时调用也不报错（重复退出是正常操作，不该弹错误）
+        StpUtil.logout();
+    }
+
+    @Override
     public LoginUserVO toLoginUserVO(User user) {
         if (user == null) {
             return null;
