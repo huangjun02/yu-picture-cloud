@@ -79,6 +79,23 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
         StpUtil.logout();
     }
 
+    /**
+     * 实体 → 脱敏 VO。
+     *
+     * <p><b>为什么手写 set，而不用 {@code BeanUtils.copyProperties(user, vo)}：</b>
+     * <ul>
+     *   <li><b>id 这个字段它拷不过去</b>：实体是 {@code Long}、VO 是 {@code String}，
+     *       反射拷贝碰到类型不兼容会直接跳过（字段留 null，不转换、不报错、不打日志）。
+     *       实测：copyProperties 之后 {@code vo.getId() == null}，其余 6 个字段正常。
+     *       也就是说该写的 {@code String.valueOf(...)} 一行都省不掉。</li>
+     *   <li><b>脱敏边界必须写在明面上</b>：手写 set 显式声明「这个接口对外暴露哪些字段」；
+     *       而 copyProperties 的语义是"同名就搬"—— 将来实体新增敏感字段（如 userPhone）、
+     *       VO 恰好也有同名字段时，会被静默带出去，没有任何提示。
+     *       今天 userPassword 没泄漏只是因为 VO 里没有这个字段，不能指望这种巧合。</li>
+     * </ul>
+     * <p>若将来字段多到值得上映射框架，用 MapStruct（编译期生成代码，类型不匹配直接编译报错），
+     * 不要用运行期反射拷贝。
+     */
     @Override
     public LoginUserVO toLoginUserVO(User user) {
         if (user == null) {
