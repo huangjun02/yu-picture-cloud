@@ -16,6 +16,7 @@ import com.huang.yupicture.model.entity.User;
 import com.huang.yupicture.model.vo.LoginUserVO;
 import com.huang.yupicture.model.vo.UserVO;
 import com.huang.yupicture.service.UserService;
+import com.huang.yupicture.utils.ParamUtils;
 import com.huang.yupicture.utils.PasswordUtils;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.dao.DuplicateKeyException;
@@ -34,12 +35,6 @@ import java.util.stream.Collectors;
 @Slf4j
 @Service
 public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements UserService {
-
-    /** 分页每页条数上限 —— requirements 6.2：列表接口强制分页，默认每页 ≤ 20 条 */
-    private static final int MAX_PAGE_SIZE = 20;
-
-    /** 前端没传 pageSize 时的默认条数 */
-    private static final int DEFAULT_PAGE_SIZE = 10;
 
     @Override
     public LoginUserVO userLogin(String userAccount, String userPassword) {
@@ -237,7 +232,7 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
         }
         String userAccount = userAddRequest.getUserAccount();
         String userPassword = userAddRequest.getUserPassword();
-        if (isBlank(userAccount) || isBlank(userPassword)) {
+        if (ParamUtils.isBlank(userAccount) || ParamUtils.isBlank(userPassword)) {
             throw new BusinessException(ErrorCode.PARAMS_ERROR, "账号和密码不能为空");
         }
         if (userAccount.length() < 4 || userAccount.length() > 20) {
@@ -252,7 +247,7 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
         // 角色白名单：不加这条，前端能传 userRole="superadmin" 造出一个谁都不认识的脏角色；
         // 而 checkAdminUser() 只认 "admin"，那种账号既不是管理员、又过不了任何角色判断
         String userRole = userAddRequest.getUserRole();
-        if (isBlank(userRole)) {
+        if (ParamUtils.isBlank(userRole)) {
             userRole = UserConstant.DEFAULT_ROLE;
         } else if (!UserConstant.DEFAULT_ROLE.equals(userRole) && !UserConstant.ADMIN_ROLE.equals(userRole)) {
             throw new BusinessException(ErrorCode.PARAMS_ERROR, "角色只能是 user 或 admin");
@@ -269,7 +264,7 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
         user.setUserPassword(PasswordUtils.encrypt(userPassword));
         // 昵称不填就取账号，与注册的默认行为保持一致
         String userName = userAddRequest.getUserName();
-        user.setUserName(isBlank(userName) ? userAccount : userName);
+        user.setUserName(ParamUtils.isBlank(userName) ? userAccount : userName);
         user.setUserAvatar(userAddRequest.getUserAvatar());
         user.setUserProfile(userAddRequest.getUserProfile());
         user.setUserRole(userRole);
@@ -297,7 +292,7 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
         if (userUpdateRequest == null) {
             throw new BusinessException(ErrorCode.PARAMS_ERROR);
         }
-        long userId = parseId(userUpdateRequest.getId());
+        long userId = ParamUtils.parseId(userUpdateRequest.getId());
         if (this.getById(userId) == null) {
             throw new BusinessException(ErrorCode.PARAMS_ERROR, "用户不存在");
         }
@@ -338,7 +333,7 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
     public boolean userDelete(String id) {
         checkAdminUser();
 
-        long userId = parseId(id);
+        long userId = ParamUtils.parseId(id);
         // 不能删自己：逻辑删除只是置标记，删完自己连管理面板都进不去
         if (userId == getLoginUser().getId()) {
             throw new BusinessException(ErrorCode.PARAMS_ERROR, "不能删除自己");
@@ -368,7 +363,7 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
     public UserVO getUserById(String id) {
         checkAdminUser();
 
-        User user = this.getById(parseId(id));
+        User user = this.getById(ParamUtils.parseId(id));
         if (user == null) {
             throw new BusinessException(ErrorCode.PARAMS_ERROR, "用户不存在");
         }
@@ -383,37 +378,35 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
             throw new BusinessException(ErrorCode.PARAMS_ERROR);
         }
 
-        // 分页参数加固 —— 前端传 -1 或 100000 都不能让数据库难受。
-        // PaginationInnerInterceptor 没配 maxLimit，所以上限必须在这里夹：
-        // 少了这一步，pageSize=100000 就是一次全表查询（requirements 6.2 要求每页 ≤ 20）
-        Integer pageNumParam = userQueryRequest.getPageNum();
-        Integer pageSizeParam = userQueryRequest.getPageSize();
-        long pageNum = (pageNumParam == null || pageNumParam < 1) ? 1 : pageNumParam;
-        long pageSize = (pageSizeParam == null || pageSizeParam < 1)
-                ? DEFAULT_PAGE_SIZE
-                : Math.min(pageSizeParam, MAX_PAGE_SIZE);
+        // 分页参数加固：逻辑已上提到 PageRequest（user / image 两处共用同一份），
+        // 这里只负责取"能安全交给数据库"的值。
+        // null / 0 / 负数 / 超过上限分别怎么处理，见 PageRequest#resolvePageNum / #resolvePageSize
+        long pageNum = userQueryRequest.resolvePageNum();
+        long pageSize = userQueryRequest.resolvePageSize();
 
         LambdaQueryWrapper<User> wrapper = new LambdaQueryWrapper<>();
         // 条件全是"可选"的：没填就不进 WHERE（不为 null 也不为空串才算填了）
-        if (!isBlank(userQueryRequest.getId())) {
-            wrapper.eq(User::getId, parseId(userQueryRequest.getId()));
+        if (!ParamUtils.isBlank(userQueryRequest.getId())) {
+            wrapper.eq(User::getId, ParamUtils.parseId(userQueryRequest.getId()));
         }
-        if (!isBlank(userQueryRequest.getUserAccount())) {
+        if (!ParamUtils.isBlank(userQueryRequest.getUserAccount())) {
             wrapper.like(User::getUserAccount, userQueryRequest.getUserAccount());
         }
-        if (!isBlank(userQueryRequest.getUserName())) {
+        if (!ParamUtils.isBlank(userQueryRequest.getUserName())) {
             wrapper.like(User::getUserName, userQueryRequest.getUserName());
         }
-        if (!isBlank(userQueryRequest.getUserProfile())) {
+        if (!ParamUtils.isBlank(userQueryRequest.getUserProfile())) {
             wrapper.like(User::getUserProfile, userQueryRequest.getUserProfile());
         }
-        if (!isBlank(userQueryRequest.getUserRole())) {
+        if (!ParamUtils.isBlank(userQueryRequest.getUserRole())) {
             // 角色用 eq 不用 like：like 会让 "adm" 也能查出 "admin"，而角色是给程序判断用的枚举语义
             wrapper.eq(User::getUserRole, userQueryRequest.getUserRole());
         }
         // 排序不是"好看"，是正确性问题：没有 ORDER BY 时 MySQL 不保证返回顺序，
         // 翻页会出现"某条记录重复出现、另一条永远看不到"
-        wrapper.orderByDesc(User::getCreateTime);
+        // 第二排序键必须有：createTime 精确到秒，同一秒注册的几条记录之间顺序仍然不定，
+        // 只按时间排还是可能翻页重复 / 漏项。补上 id，顺序才唯一确定。
+        wrapper.orderByDesc(User::getCreateTime).orderByDesc(User::getId);
 
         Page<User> userPage = this.page(new Page<>(pageNum, pageSize), wrapper);
 
@@ -449,38 +442,4 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
         return userVO;
     }
 
-    /**
-     * 把前端传来的字符串 id 解析成 long。
-     *
-     * <p>DTO 里的 id 是 String（雪花 id 必须字符串化，见 {@code LoginUserVO#id}），
-     * 而数据库列是 bigint —— 这个转换点必须显式存在，且失败要变成 40000 参数错误。
-     * 否则 {@code Long.parseLong} 抛的 {@code NumberFormatException} 会一路冒到
-     * GlobalExceptionHandler 的 {@code Exception} 分支，被报成"系统内部异常"(50000)：
-     * 前端以为是服务器挂了，实际只是传了个 "abc"。
-     */
-    private long parseId(String id) {
-        if (isBlank(id)) {
-            throw new BusinessException(ErrorCode.PARAMS_ERROR, "id 不能为空");
-        }
-        long userId;
-        try {
-            userId = Long.parseLong(id.trim());
-        } catch (NumberFormatException e) {
-            throw new BusinessException(ErrorCode.PARAMS_ERROR, "id 格式不正确");
-        }
-        if (userId <= 0) {
-            throw new BusinessException(ErrorCode.PARAMS_ERROR, "id 不合法");
-        }
-        return userId;
-    }
-
-    /**
-     * null 或纯空白都算"没填"。
-     *
-     * <p>自己写一个而不用 {@code StringUtils.isBlank}：那需要引 commons-lang3，
-     * 只为这一个方法加依赖不划算（项目当前没有这个依赖）。
-     */
-    private static boolean isBlank(String s) {
-        return s == null || s.isBlank();
-    }
 }
