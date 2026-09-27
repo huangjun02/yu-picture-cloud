@@ -1,6 +1,7 @@
 package com.huang.yupicture.service;
 
 import com.baomidou.mybatisplus.spring.service.IService;
+import com.huang.yupicture.model.dto.user.UserRegisterRequest;
 import com.huang.yupicture.model.entity.User;
 import com.huang.yupicture.model.vo.LoginUserVO;
 
@@ -48,4 +49,12 @@ public interface UserService extends IService<User> {
      * @return 脱敏 VO，入参 null 时返回 null
      */
     LoginUserVO toLoginUserVO(User user);
+
+    /**
+     * 用户注册。
+     *
+     * @param userRegisterRequest 注册请求（账号、密码、确认密码）
+     * @return 新用户的 id（字符串形式 —— 19 位雪花 id 直接给 JS 会丢精度）
+     */
+    String userRegister(UserRegisterRequest userRegisterRequest);
 }

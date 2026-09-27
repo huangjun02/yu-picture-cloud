@@ -5,7 +5,9 @@ import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.spring.service.impl.ServiceImpl;
 import com.huang.yupicture.common.BusinessException;
 import com.huang.yupicture.common.ErrorCode;
+import com.huang.yupicture.constant.UserConstant;
 import com.huang.yupicture.mapper.UserMapper;
+import com.huang.yupicture.model.dto.user.UserRegisterRequest;
 import com.huang.yupicture.model.entity.User;
 import com.huang.yupicture.model.vo.LoginUserVO;
 import com.huang.yupicture.service.UserService;
@@ -35,6 +37,8 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
         }
 
         // 2. 按账号查用户
+        // TODO(用户模块收官): 这段"按账号查一条"在 userLogin / userRegister 里重复，届时抽成
+        //  private User getByAccount(String account)，两处调用都换成它
         User user = this.getOne(new LambdaQueryWrapper<User>()
                 .eq(User::getUserAccount, userAccount));
 
@@ -111,5 +115,67 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
         loginUserVO.setUserRole(user.getUserRole());
         loginUserVO.setCreateTime(user.getCreateTime());
         return loginUserVO;
+    }
+
+    @Override
+    public String userRegister(UserRegisterRequest userRegisterRequest) {
+        // 1. 参数校验（手写，项目不引 Bean Validation）
+        if (userRegisterRequest == null) {
+            throw new BusinessException(ErrorCode.PARAMS_ERROR);
+        }
+        String userAccount = userRegisterRequest.getUserAccount();
+        String userPassword = userRegisterRequest.getUserPassword();
+        String checkPassword = userRegisterRequest.getCheckPassword();
+        if (userAccount == null || userPassword == null || checkPassword == null) {
+            throw new BusinessException(ErrorCode.PARAMS_ERROR);
+        }
+        if (userAccount.length() < 4 || userAccount.length() > 20) {
+            throw new BusinessException(ErrorCode.PARAMS_ERROR, "账号长度必须在 4 到 20 个字符之间");
+        }
+        // 字符白名单：只允许字母/数字/下划线。不加这条，空格、中文、emoji 都能进库，
+        // 后续拼 URL、模糊搜索、前端展示都会出问题。
+        if (!userAccount.matches("^[a-zA-Z0-9_]+$")) {
+            throw new BusinessException(ErrorCode.PARAMS_ERROR, "账号格式不合法");
+        }
+        // ⚠️ 密码只设下限、不设上限：加上限会拒掉用户的强密码，而且与登录接口不对称
+        //（登录只校验 ≥ 8），会出现"能登录却注册不了"的矛盾。
+        if (userPassword.length() < 8) {
+            throw new BusinessException(ErrorCode.PARAMS_ERROR, "密码长度不能少于 8 位");
+        }
+        if (!userPassword.equals(checkPassword)) {
+            throw new BusinessException(ErrorCode.PARAMS_ERROR, "两次输入的密码不一致");
+        }
+
+        // 2. 查重 —— 只是"友好提示"，真正的唯一性由数据库 uk_userAccount 兜底：
+        //    并发下两个请求会双双通过这一关，靠唯一索引挡住后一个
+        // TODO(用户模块收官): 与 userLogin 里"按账号查一条"一起抽成 private User getByAccount(String)。
+        //  另：userLogin 用链式、本方法拆成三步，两种等价；抽方法时顺手统一风格。
+        LambdaQueryWrapper<User> queryWrapper = new LambdaQueryWrapper<>();
+        queryWrapper.eq(User::getUserAccount, userAccount);
+        User user = this.getOne(queryWrapper);
+        if (user != null) {
+            throw new BusinessException(ErrorCode.PARAMS_ERROR, "账号已存在");
+        }
+
+        // 3. 加密 + 落库（明文到此为止，以下全是密文）
+        user = new User();
+        user.setUserAccount(userAccount);
+        user.setUserPassword(PasswordUtils.encrypt(userPassword));
+        // 默认昵称取账号，之后允许用户自己改（可空字段）
+        user.setUserName(userAccount);
+        // 角色显式赋值：DDL 虽然写了 DEFAULT 'user'，但那条默认值生效的前提是
+        // MyBatis-Plus 的 NOT_NULL 插入策略（null 字段不进 SQL）—— 依赖隐式行为不如写明意图
+        user.setUserRole(UserConstant.DEFAULT_ROLE);
+        boolean saveResult = this.save(user);
+        if (!saveResult) {
+            throw new BusinessException(ErrorCode.SYSTEM_ERROR, "注册失败");
+        }
+        // TODO(用户模块收官): 并发同名注册会双双通过上面的查重，第二个在此撞唯一索引抛
+        //  DuplicateKeyException，被全局处理器翻成 50000。届时 catch 它并翻译成"账号已存在"。
+
+        // 4. 返回 id 的字符串形式；注册后不自动登录（与 Controller 的约定一致）
+        //    ⚠️ 日志只记 id 和账号，绝不记密码 —— 打印整个请求体会把明文密码写进日志文件
+        log.info("用户注册成功：id={}, account={}", user.getId(), user.getUserAccount());
+        return String.valueOf(user.getId());
     }
 }

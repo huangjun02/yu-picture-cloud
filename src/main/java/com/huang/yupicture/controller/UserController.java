@@ -5,6 +5,7 @@ import com.huang.yupicture.common.BusinessException;
 import com.huang.yupicture.common.ErrorCode;
 import com.huang.yupicture.common.ResultUtils;
 import com.huang.yupicture.model.dto.user.UserLoginRequest;
+import com.huang.yupicture.model.dto.user.UserRegisterRequest;
 import com.huang.yupicture.model.entity.User;
 import com.huang.yupicture.model.vo.LoginUserVO;
 import com.huang.yupicture.service.UserService;
@@ -73,5 +74,23 @@ public class UserController {
     public BaseResponse<LoginUserVO> getLoginUser() {
         User user = userService.getLoginUser();
         return ResultUtils.success(userService.toLoginUserVO(user));
+    }
+
+    /**
+     * 用户注册。
+     *
+     * <p>返回新用户的 id（字符串形式）。<b>这里不自动登录</b>：注册和登录是两个动作，
+     * 前端拿到 id 后自己跳登录页 —— 自动登录会糊掉"注册成功"这个语义边界。
+     *
+     * <p>返回值用 String 而不是 Long，原因同 {@code LoginUserVO#id}：
+     * 19 位雪花 id 序列化成数字后，JS 端静默丢精度。
+     */
+    @PostMapping("/register")
+    @Operation(summary = "用户注册")
+    public BaseResponse<String> userRegister(@RequestBody UserRegisterRequest userRegisterRequest) {
+        if (userRegisterRequest == null) {
+            throw new BusinessException(ErrorCode.PARAMS_ERROR, "请求参数为空");
+        }
+        return ResultUtils.success(userService.userRegister(userRegisterRequest));
     }
 }
