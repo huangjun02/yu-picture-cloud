@@ -7,6 +7,8 @@ import com.huang.yupicture.model.dto.image.ImageQueryRequest;
 import com.huang.yupicture.model.dto.image.ImageUpdateRequest;
 import com.huang.yupicture.model.vo.ImageVO;
 import com.huang.yupicture.service.ImageService;
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.annotation.Resource;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -33,9 +35,14 @@ import org.springframework.web.multipart.MultipartFile;
  *   <li>URL：{@code /image/get?id=xxx}、{@code /image/delete?id=xxx}</li>
  *   <li>Body：{@code /image/list/page}、{@code /image/update}</li>
  * </ul>
+ *
+ * <p><b>权限说明</b>：本模块没有"只有管理员能进"的接口，只有"本人 or 管理员"（Service 里的
+ * {@code checkImageOwner}）。所以 {@code @Operation} 的 summary 里标的是"本人或管理员"，
+ * 而不是像 user 模块那样用"管理员 xxx"前缀。
  */
 @RestController
 @RequestMapping("/image")
+@Tag(name = "图片接口")
 public class ImageController {
 
     @Resource
@@ -55,6 +62,7 @@ public class ImageController {
      * 才能正确拿到文件的原始文件名和 Content-Type。
      */
     @PostMapping("/upload")
+    @Operation(summary = "上传图片")
     public BaseResponse<ImageVO> uploadImage(@RequestPart("file") MultipartFile file,
                                              @RequestParam(value = "name", required = false) String name) {
         return ResultUtils.success(imageService.uploadImage(file, name));
@@ -66,6 +74,7 @@ public class ImageController {
      * @param id 图片 id（字符串形式的雪花 id；前端必须传字符串，不能传数字）
      */
     @PostMapping("/get")
+    @Operation(summary = "查询图片详情（本人或管理员）")
     public BaseResponse<ImageVO> getImageById(@RequestParam String id) {
         return ResultUtils.success(imageService.getImageById(id));
     }
@@ -77,6 +86,7 @@ public class ImageController {
      * 管理员能查全部，也能主动传 userId 查某个人。
      */
     @PostMapping("/list/page")
+    @Operation(summary = "分页查询图片（普通用户只返回自己的）")
     public BaseResponse<Page<ImageVO>> listImageByPage(@RequestBody ImageQueryRequest imageQueryRequest) {
         return ResultUtils.success(imageService.listImageByPage(imageQueryRequest));
     }
@@ -87,6 +97,7 @@ public class ImageController {
      * <p>id 放在请求体里：因为这是"多字段更新"，id 和要改的字段同属一次提交。
      */
     @PostMapping("/update")
+    @Operation(summary = "编辑图片（本人或管理员）")
     public BaseResponse<Boolean> updateImage(@RequestBody ImageUpdateRequest imageUpdateRequest) {
         return ResultUtils.success(imageService.updateImage(imageUpdateRequest));
     }
@@ -97,6 +108,7 @@ public class ImageController {
      * <p>id 放在 URL：只删一条、只认一个 id，没有别的参数。
      */
     @PostMapping("/delete")
+    @Operation(summary = "删除图片（本人或管理员）")
     public BaseResponse<Boolean> deleteImage(@RequestParam String id) {
         return ResultUtils.success(imageService.deleteImage(id));
     }
