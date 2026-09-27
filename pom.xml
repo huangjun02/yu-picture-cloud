@@ -21,7 +21,7 @@
         <java.version>21</java.version>
         <mybatis-plus.version>3.5.17</mybatis-plus.version>
         <sa-token.version>1.46.0</sa-token.version>
-        <knife4j.version>4.5.0</knife4j.version>
+        <springdoc.version>2.8.17</springdoc.version>
         <cos.version>5.6.246.3</cos.version>
     </properties>
 
@@ -91,11 +91,21 @@
             <version>${sa-token.version}</version>
         </dependency>
 
-        <!-- 接口文档：openapi3 + jakarta 版 -->
+        <!-- 接口文档：springdoc-openapi（Swagger UI）。
+             为什么【不用 knife4j】—— 它 4.5.0 与 Spring Boot 3.5 是两个方向都不兼容：
+               ① knife4j 4.5.0 传递 springdoc 2.3.0，而 springdoc < 2.8.9 与 Spring Boot 3.5
+                  （Spring Framework 6.2）不兼容 → NoSuchMethodError: ControllerAdviceBean.<init>(Object)
+               ② 手动把 springdoc 升到 2.8.17 后，轮到 knife4j 自己不兼容 ——
+                  它的 Knife4jOpenApiCustomizer 调用了 springdoc 2.8 已删除的
+                  SpringDocConfigProperties.getGroupConfigs() → 又一个 NoSuchMethodError
+             这类问题的共同症状：doc.html 能打开（HTTP 200），但拿不到任何接口，返回 {code:50000}。
+             排查要点：NoSuchMethodError 一定是「编译期存在、运行期消失」的方法 ——
+             顺着栈里的类名去查两边各自的版本要求，不要只看自己 pom 里写的版本。
+             兼容矩阵：https://springdoc.org/faq.html -->
         <dependency>
-            <groupId>com.github.xiaoymin</groupId>
-            <artifactId>knife4j-openapi3-jakarta-spring-boot-starter</artifactId>
-            <version>${knife4j.version}</version>
+            <groupId>org.springdoc</groupId>
+            <artifactId>springdoc-openapi-starter-webmvc-ui</artifactId>
+            <version>${springdoc.version}</version>
         </dependency>
 
         <!-- 腾讯云 COS（对象存储）Java SDK —— 图片模块用它存文件本体

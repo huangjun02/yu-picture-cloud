@@ -46,12 +46,9 @@ mybatis-plus:
       logic-delete-field: isDelete
       logic-delete-value: 1
       logic-not-delete-value: 0
-cos:
-  client:
-    access-key: <你的SecretId>
-    secret-key: <你的SecretKey>
-    region: <你的区域>
-    bucket: <你的桶 + APPID>
+# ⚠️ COS 的真实密钥【只】放在 application-local.yml（已被 .gitignore 忽略）。
+# 这里故意不留占位符：占位符出现在版本库里不会让任何东西跑起来，
+# 只会让人误以为"配置应该写这儿"，然后一不小心把真密钥提交上去。
 
 sa-token:
   token-name: satoken
@@ -66,14 +63,19 @@ sa-token:
   cookie:
     http-only: true
 
-knife4j:
-  enable: true
-  openapi:
-    title: 云图库接口文档
-    version: 1.0
-    group:
-      default:
-        group-name: 默认分组
-        api-rule: package
-        api-rule-resources:
-          - com.huang.yupicture.controller
+# 接口文档：springdoc 官方 Swagger UI（已弃用 knife4j，原因见 pom.xml 依赖注释）。
+# 访问地址：http://localhost:8123/api/swagger-ui.html
+# 备用（前端代码生成就靠它）：http://localhost:8123/api/v3/api-docs/default
+springdoc:
+  api-docs:
+    enabled: true
+    path: /v3/api-docs
+    info:
+      title: 云图库接口文档
+      version: "1.0"
+  swagger-ui:
+    path: /swagger-ui.html
+  group-configs:
+    - group: default
+      display-name: 默认分组
+      packages-to-scan: com.huang.yupicture.controller
