@@ -23,11 +23,19 @@ JDK 21 · Maven 3.9+ · MySQL 8 · Redis
 
 ### 2. 初始化数据库
 
-在 IDEA 的 Database 工具 / Navicat 中执行：
+在 IDEA 的 Database 工具 / Navicat 中执行（按编号顺序）：
 
-```
-sql/01_create_database.sql
-```
+| 脚本 | 作用 | 什么时候跑 |
+|---|---|---|
+| `sql/01_create_database.sql` | 建库 `yu_picture_cloud`（utf8mb4） | 首次 |
+| `sql/02_create_table_user.sql` | 建 `user` 表（含索引） | 首次 |
+| `sql/03_init_test_user.sql` | 插入联调种子账号 `huangjun` | 可选 |
+| `sql/04_alter_user_unique_index.sql` | 账号唯一索引改为 `(userAccount, isDelete)` | **只有"表已存在"的老库需要** |
+
+> 为什么 `02` 里已经有索引定义，还要单独一个 `04`？
+> `02` 用的是 `CREATE TABLE IF NOT EXISTS` —— 表一旦存在，**重跑它什么都不会发生**。
+> 所以给老库改索引只能靠独立的 `ALTER` 语句，即 `04`。
+> 这是数据库脚本的通用规矩：**执行过的脚本不再改语义，新的变更另起一个编号的文件**。
 
 ### 3. 配置本地密码
 
@@ -62,13 +70,31 @@ mvn spring-boot:run
 
 ```
 src/main/java/com/huang/yupicture/
-├── common/                        通用返回结构
-│   ├── ErrorCode.java             错误码枚举
-│   ├── BaseResponse.java          统一响应体 {code, data, message}
-│   └── ResultUtils.java           响应构造工具
-├── controller/                    接口层
-│   └── HealthController.java
-└── YuPictureCloudApplication.java 启动类
+├── common/                          通用层
+│   ├── BaseResponse.java            统一响应体 {code, data, message}
+│   ├── ResultUtils.java             响应构造工具
+│   ├── ErrorCode.java               错误码枚举
+│   ├── BusinessException.java       业务异常（message 直接给用户看）
+│   └── GlobalExceptionHandler.java  全局异常 → 统一响应（含 NotLoginException → 40100）
+├── config/                          配置
+│   ├── MybatisPlusConfig.java       @MapperScan + 分页插件
+│   ├── CorsConfig.java              全局跨域（Filter 层，早于 DispatcherServlet）
+│   └── SaTokenConfig.java           全局登录拦截 + 免登录白名单
+├── constant/UserConstant.java       角色、盐值等常量
+├── controller/                      接口层：只做「收参 → 调 Service → 包返回」
+│   ├── HealthController.java
+│   └── UserController.java
+├── mapper/UserMapper.java           持久层（XML 在 resources/mapper/）
+├── model/
+│   ├── entity/User.java             实体，与表一一对应
+│   ├── dto/user/                    入参：Login / Register / Add / Update / Query
+│   ├── dto/common/PageRequest.java  分页基类（图片模块也会用）
+│   └── vo/                          出参（脱敏）：LoginUserVO / UserVO
+├── service/
+│   ├── UserService.java
+│   └── impl/UserServiceImpl.java    业务规则都在这一层（含权限判定）
+├── utils/PasswordUtils.java         加盐摘要
+└── YuPictureCloudApplication.java   启动类
 ```
 
 ## 接口约定
@@ -85,7 +111,7 @@ src/main/java/com/huang/yupicture/
 ## 开发进度
 
 - [x] **项目初始化** —— Spring Boot 骨架、统一返回结构、健康检查（TDD）、数据库、MyBatis-Plus / Sa-Token / Knife4j 接入
-- [ ] **用户模块** —— 注册、登录、权限校验
+- [x] **用户模块** —— 注册、登录、登出、获取当前登录用户；全局登录拦截 + 管理员权限校验；管理员用户管理（新增 / 更新 / 删除 / 分页检索）
 - [ ] **图片模块** —— 上传、检索、审核
 - [ ] **空间模块** —— 私有空间 / 团队空间、成员管理
 
