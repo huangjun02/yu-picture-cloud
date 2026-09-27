@@ -29,9 +29,17 @@ public class SaTokenConfig implements WebMvcConfigurer {
             // 健康检查
             "/health",
             // knife4j / springdoc 的文档页与静态资源 —— 不放行则接口文档打不开
+            // knife4j 的 doc.html 用【相对路径】引用资源（webjars/css/...），
+            // 所以实际请求是 /api/webjars/** —— 剥掉 context-path 后正是下面这几条。
+            // doc.html 自身也带一句提示：「确保 knife4j 静态资源被放行，别被安全框架拦截」。
             "/doc.html",
             "/webjars/**",
+            // knife4j 的图标资源（favicon 等）在 /img/** 下，拦了页面主体仍可用，但控制台会刷 40100
+            "/img/**",
             "/v3/api-docs/**",
+            // ⚠️ 必须单独写这一条：/swagger-ui/** 匹配不到 /swagger-ui.html
+            //（Ant 的 /** 要求「/swagger-ui/」前缀，而 .html 是独立路径，不是目录下的文件）
+            "/swagger-ui.html",
             "/swagger-ui/**",
             "/swagger-resources/**",
             "/favicon.ico",

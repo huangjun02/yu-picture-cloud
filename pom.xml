@@ -22,6 +22,8 @@
         <mybatis-plus.version>3.5.17</mybatis-plus.version>
         <sa-token.version>1.46.0</sa-token.version>
         <springdoc.version>2.8.17</springdoc.version>
+        <!-- knife4j 只用「纯 UI 版」，见下方依赖处的注释：它与 springdoc 版本解耦 -->
+        <knife4j.version>4.5.0</knife4j.version>
         <cos.version>5.6.246.3</cos.version>
     </properties>
 
@@ -91,21 +93,31 @@
             <version>${sa-token.version}</version>
         </dependency>
 
-        <!-- 接口文档：springdoc-openapi（Swagger UI）。
-             为什么【不用 knife4j】—— 它 4.5.0 与 Spring Boot 3.5 是两个方向都不兼容：
-               ① knife4j 4.5.0 传递 springdoc 2.3.0，而 springdoc < 2.8.9 与 Spring Boot 3.5
-                  （Spring Framework 6.2）不兼容 → NoSuchMethodError: ControllerAdviceBean.<init>(Object)
-               ② 手动把 springdoc 升到 2.8.17 后，轮到 knife4j 自己不兼容 ——
-                  它的 Knife4jOpenApiCustomizer 调用了 springdoc 2.8 已删除的
-                  SpringDocConfigProperties.getGroupConfigs() → 又一个 NoSuchMethodError
-             这类问题的共同症状：doc.html 能打开（HTTP 200），但拿不到任何接口，返回 {code:50000}。
+        <!-- 接口文档：springdoc-openapi 负责「生成数据」，knife4j 纯 UI 负责「渲染界面」。
+             为什么这个组合成立，而 knife4j 的 starter 不行（踩过的坑，别再走回去）：
+               ① knife4j-openapi3-jakarta-spring-boot-starter 自带 Knife4jOpenApiCustomizer，
+                  它调用了 springdoc 的内部 API（SpringDocConfigProperties.getGroupConfigs()）。
+                  springdoc < 2.8.9 与 Spring Boot 3.5（Spring Framework 6.2）不兼容 →
+                  NoSuchMethodError: ControllerAdviceBean.<init>(Object)；
+                  而把 springdoc 升到 2.8.17，轮到这个 Customizer 撞已删除的方法 → 又一个 NoSuchMethodError。
+               ② knife4j-openapi3-ui 是【纯静态资源 jar】：pom 里零依赖，jar 内不含任何 .class，
+                  所以它与 Spring Boot / springdoc 的版本完全解耦。官方原话：
+                  「不论 Swagger2 还是 OpenAPI3 规范，Knife4j 最新版本的纯 UI 版本可以适配 Spring Boot 所有版本；
+                    如果不使用服务端增强功能，引入纯 UI 版本没有任何限制，只需考虑规范。」
+                  本项目是 OpenAPI3 → 选 openapi3-ui。
+             入口：/doc.html（已弃用的旧 starter 会在 doc.html 返回 {code:50000}，那是 ① 的症状）。
              排查要点：NoSuchMethodError 一定是「编译期存在、运行期消失」的方法 ——
-             顺着栈里的类名去查两边各自的版本要求，不要只看自己 pom 里写的版本。
+             顺着栈里的类名查两边各自的版本要求，别只看 pom 里写的版本。
              兼容矩阵：https://springdoc.org/faq.html -->
         <dependency>
             <groupId>org.springdoc</groupId>
             <artifactId>springdoc-openapi-starter-webmvc-ui</artifactId>
             <version>${springdoc.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>com.github.xiaoymin</groupId>
+            <artifactId>knife4j-openapi3-ui</artifactId>
+            <version>${knife4j.version}</version>
         </dependency>
 
         <!-- 腾讯云 COS（对象存储）Java SDK —— 图片模块用它存文件本体
