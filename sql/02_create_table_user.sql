@@ -24,7 +24,10 @@ CREATE TABLE IF NOT EXISTS `user`
     updateTime   DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
     isDelete     TINYINT       NOT NULL DEFAULT 0 COMMENT '是否删除：0-正常，1-已删除（逻辑删除）',
     PRIMARY KEY (id),
-    UNIQUE KEY uk_userAccount (userAccount),
+    -- 账号唯一性用「复合唯一」：同账号最多一条活着(isDelete=0) + 最多一条已删除(isDelete=1)。
+    -- 单列唯一 uk_userAccount 会让逻辑删除的账号永久占用名字，用户"删号后想重新注册"就报"账号已存在"。
+    -- 详见 sql/04_alter_user_unique_index.sql（含该方案的已知局限）。
+    UNIQUE KEY uk_userAccount_isDelete (userAccount, isDelete),
     KEY idx_userName (userName)
 ) ENGINE = InnoDB
   DEFAULT CHARSET = utf8mb4
