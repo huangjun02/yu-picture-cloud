@@ -2,6 +2,7 @@ package com.huang.yupicture.common;
 
 import cn.dev33.satoken.exception.NotLoginException;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.web.multipart.MaxUploadSizeExceededException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 
@@ -49,5 +50,22 @@ public class GlobalExceptionHandler {
     public BaseResponse<?> notLoginExceptionHandler(NotLoginException e) {
         log.warn("NotLoginException: type={}, message={}", e.getType(), e.getMessage());
         return ResultUtils.error(ErrorCode.NOT_LOGIN_ERROR);
+    }
+
+    /**
+     * 上传文件超过大小上限。
+     *
+     * <p><b>为什么必须单独处理：</b>Spring 在**解析请求体**阶段就把它拒绝了，
+     * 异常根本到不了 Controller —— 所以它不是 {@link BusinessException}，
+     * 不处理就会落到上面 {@code Exception} 兜底分支，报成 50000「系统内部异常」。
+     * 用户传了一张 8MB 的照片，得到的提示却是"服务器内部错误"，完全看不出该怎么办。
+     *
+     * <p>⚠️ 提示里的 5MB 与 {@code application.yml} 的 {@code spring.servlet.multipart.max-file-size}
+     * 是同一件事的两处表述，改配置时这里要同步改 —— 否则提示语会与真实行为不符。
+     */
+    @ExceptionHandler(MaxUploadSizeExceededException.class)
+    public BaseResponse<?> maxUploadSizeExceededExceptionHandler(MaxUploadSizeExceededException e) {
+        log.warn("上传文件超过大小上限: {}", e.getMessage());
+        return ResultUtils.error(ErrorCode.PARAMS_ERROR, "上传文件过大，单个文件不能超过 5MB");
     }
 }

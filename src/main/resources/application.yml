@@ -8,6 +8,13 @@ spring:
     name: yu-picture-cloud
   profiles:
     active: local
+  # 文件上传大小上限（框架层第一道防线）：超过就由 Spring 直接拒绝，不进业务代码。
+  # 两道防线各管一段 —— 框架层挡住"超大请求"（连解析都不做，省内存），
+  # 业务层挡住"格式不对 / 后缀伪装的文件"（见 ImageUtils#checkUploadFile）。
+  servlet:
+    multipart:
+      max-file-size: 5MB
+      max-request-size: 5MB
   datasource:
     driver-class-name: com.mysql.cj.jdbc.Driver
     url: jdbc:mysql://localhost:3306/yu_picture_cloud?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true&useSSL=false
@@ -39,6 +46,12 @@ mybatis-plus:
       logic-delete-field: isDelete
       logic-delete-value: 1
       logic-not-delete-value: 0
+cos:
+  client:
+    access-key: <你的SecretId>
+    secret-key: <你的SecretKey>
+    region: <你的区域>
+    bucket: <你的桶 + APPID>
 
 sa-token:
   token-name: satoken
