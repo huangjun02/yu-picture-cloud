@@ -23,8 +23,13 @@ spring:
   data:
     redis:
       host: localhost
-      # 6379 = 本机 Redis 服务（2026-09-27 已从 3.0.504 升级为 8.10.2，Windows 服务、开机自启）。
-      # 旧 3.0.504 不支持 EXAT（`SET k v EXAT <ts>` 直接 ERR syntax error），Sa-Token 写会话会失败 → 登录 50000。
+      # 6379 = 本机 Redis 8.10.2 Windows 服务（"Redis" 服务，开机自启）。
+      # ⚠️ 这台机曾有两个 Redis 服务都配 6379：8.10.2（"Redis"）和 2016 年的 3.2.100
+      # （"redisservice"），开机后 3.2.100 先抢到端口 —— 它不支持 EXAT
+      # （SET k v EXAT <ts> 报 ERR syntax error）→ Sa-Token 写会话失败 → 登录 50000。
+      # 2026-10-11 处置：停用并禁启 redisservice（sc.exe config ... start= disabled，
+      # 注意 PowerShell 里必须写 sc.exe，裸 sc 是 Set-Content 别名）。
+      # **验证端口归属要用 INFO server 看版本，不能只看端口通不通。**
       # 详见 docs/redis-upgrade.md
       port: 6379
       database: 0
