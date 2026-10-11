@@ -12,6 +12,7 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
 import org.springframework.web.multipart.MultipartFile;
 
+import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.util.UUID;
@@ -53,23 +54,42 @@ public class CosManager {
      * @return 对象键，如 {@code public/3f2a...c9.jpg}
      */
     public String upload(MultipartFile file, String suffix) {
+        try {
+            // 委托给 byte[] 版本：上传逻辑只存在一份（原文件读成字节后走同一条路）
+            return upload(file.getBytes(), suffix, file.getContentType());
+        } catch (IOException e) {
+            log.error("读取上传文件失败", e);
+            throw new BusinessException(ErrorCode.SYSTEM_ERROR, "图片上传失败");
+        }
+    }
+
+    /**
+     * 上传「已经过业务处理的内容」（如压缩后的图片字节），返回对象键。
+     *
+     * <p>与 {@link #upload(MultipartFile, String)} 的区别：内容以 byte[] 给定，
+     * 不再从 MultipartFile 现读 —— <b>大小与内容类型必须由调用方如实传入</b>，
+     * 因为压缩后的字节和原始请求里的文件已经不是同一份东西
+     * （拿 file.getSize() 当 Content-Length 会把 COS 上的对象截断/补零）。
+     *
+     * @param bytes        要上传的内容（最终版本，压缩后）
+     * @param suffix       文件后缀（小写，已校验）
+     * @param contentType  浏览器访问时的渲染类型，如 {@code image/jpeg}；可为 null
+     * @return 对象键，如 {@code public/3f2a...c9.jpg}
+     */
+    public String upload(byte[] bytes, String suffix, String contentType) {
         String key = buildKey(suffix);
 
         ObjectMetadata metadata = new ObjectMetadata();
-        metadata.setContentLength(file.getSize());
+        metadata.setContentLength(bytes.length);
         // 存对 Content-Type，浏览器访问时才知道怎么渲染（否则可能被当成下载）
-        metadata.setContentType(file.getContentType());
+        metadata.setContentType(contentType);
 
-        try (InputStream inputStream = file.getInputStream()) {
+        try (InputStream inputStream = new ByteArrayInputStream(bytes)) {
             PutObjectRequest request = new PutObjectRequest(
                     cosClientConfig.getBucket(), key, inputStream, metadata);
             cosClient.putObject(request);
-            log.info("文件上传成功：key={}, size={}字节", key, file.getSize());
+            log.info("文件上传成功：key={}, size={}字节", key, bytes.length);
             return key;
-        } catch (IOException e) {
-            // 读不到上传流：多半是请求提前中断（客户端断开 / 超时）
-            log.error("读取上传文件失败", e);
-            throw new BusinessException(ErrorCode.SYSTEM_ERROR, "图片上传失败");
         } catch (Exception e) {
             // COS SDK 抛 CosClientException（网络/凭证问题）或 CosServiceException（桶不存在/无权限）
             // 不把原始信息透给前端：里面可能带 SecretId 片段、桶路径等内部信息，

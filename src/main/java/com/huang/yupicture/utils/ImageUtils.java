@@ -2,11 +2,14 @@ package com.huang.yupicture.utils;
 
 import com.huang.yupicture.common.BusinessException;
 import com.huang.yupicture.common.ErrorCode;
+import net.coobird.thumbnailator.Thumbnails;
 import org.springframework.web.multipart.MultipartFile;
 
 import javax.imageio.ImageIO;
 import java.awt.image.BufferedImage;
 import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
 import java.util.Locale;
 import java.util.Set;
 
@@ -21,6 +24,15 @@ import java.util.Set;
  * 或前端某处把 URL 当脚本加载，就成了可执行的攻击载荷 —— 而这个漏洞是你"信任了文件名"造出来的。
  */
 public final class ImageUtils {
+
+    static {
+        // ImageIO 默认把编解码的中间数据缓存到磁盘（java.io.tmpdir 下建临时文件）。
+        // 在受限环境（tmpdir 不可写 / 磁盘清理中）会直接抛
+        // `IIOException: Can't create cache file!` —— 测试里就撞到过。
+        // 本项目全程操作内存里的 byte[]（单图 ≤ 5MB），关掉磁盘缓存改用内存：
+        // 更快、无临时文件残留、也不会再被 tmpdir 的问题绊倒。
+        ImageIO.setUseCache(false);
+    }
 
     /**
      * 允许的格式白名单。
@@ -106,6 +118,59 @@ public final class ImageUtils {
         } catch (Exception e) {
             return null;
         }
+    }
+
+    /** JPEG 压缩质量（0.0~1.0）。0.8 是"肉眼几乎无损、体积减半"的常用起点 */
+    public static final float COMPRESS_QUALITY = 0.8f;
+
+    /**
+     * 把图片压缩到指定质量（只降质量、不改尺寸）。
+     *
+     * <p><b>只对 JPEG 生效</b>，其余格式原样返回，各有明确原因：
+     * <ul>
+     *   <li><b>PNG</b>：无损格式，{@code outputQuality} 对它几乎不减体积；
+     *       硬转 JPEG 能变小但会丢透明通道（透明区域变黑）—— 得不偿失</li>
+     *   <li><b>WebP</b>：JDK 的 ImageIO <b>能读不能写</b> webp（{@link #readSize} 读不出
+     *       webp 尺寸是同一个根源），Thumbnails 底层走 ImageIO，输出时直接抛异常</li>
+     * </ul>
+     *
+     * <p>全程内存操作：byte[] 进 byte[] 出，不落临时文件
+     * （临时文件要管创建、清理、失败路径上的删除，漏一步就是垃圾文件堆积；
+     * 而单图 ≤ 5MB，内存里转一圈毫无压力，方法结束自动释放）。
+     *
+     * <p><b>守门：压完不比原始小就放弃。</b>小图（如 10KB 头像）、已高度压缩的 JPEG
+     * 再压一遍可能反而更大（JPEG 每次保存都重新量化，重复压缩还可能劣化）——
+     * 压缩是手段不是目的，"压过"本身没有意义，变小才有。
+     *
+     * @param bytes  图片原始字节（已通过魔数校验）
+     * @param suffix 小写后缀（jpg / jpeg / png / webp）
+     * @return 压缩后的字节；无需/无法压缩时原样返回
+     */
+    public static byte[] compress(byte[] bytes, String suffix) {
+        // ① 压不动的格式直接放行（常量在左，防 NPE 写法与 isAdmin() 一致）
+        if ("png".equals(suffix) || "webp".equals(suffix)) {
+            return bytes;
+        }
+
+        // ② 内存进出：ByteArrayInputStream 包装已有字节（读方向管道），
+        //    ByteArrayOutputStream 攒压缩结果（写方向管道），全程不碰磁盘
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        try {
+            Thumbnails.of(new ByteArrayInputStream(bytes))
+                    .scale(1.0)                        // 原尺寸；不调 size/scale 时 Builder 会抛 IllegalStateException
+                    .outputQuality(COMPRESS_QUALITY)   // 只降质量 —— "压缩"的全部来源
+                    .toOutputStream(out);
+        } catch (IOException e) {
+            // 不往外抛受检异常（项目规约，readSize() 先例）；
+            // 但也不能静默当"没压"（用户以为压了实际没压，日志与实际不符）—— 翻译成系统异常
+            throw new BusinessException(ErrorCode.SYSTEM_ERROR, "图片压缩失败");
+        }
+
+        // ③ 守门：压完 >= 原始大小就放弃（等号也算"没赚到"，不值得为它换内容）
+        if (out.size() >= bytes.length) {
+            return bytes;
+        }
+        return out.toByteArray();
     }
 
     /**

@@ -219,6 +219,19 @@ public class ImageServiceImpl extends ServiceImpl<ImageMapper, Image> implements
         // ② 内容校验：文件头魔数必须与后缀一致（防"改个名就说是图片"）
         ImageUtils.checkContent(bytes, suffix);
 
+        // ========== 阶段一点五：压缩（在魔数校验之后、存储之前） ==========
+        // 位置有讲究：放在校验之前 = 白白压缩将被拒绝的文件；放在落库之后 = 压缩失去意义。
+        // 校验已保证"这是一张真图"，此时压缩正好夹在"确认值得处理"和"付出存储成本"之间。
+        long originalSize = bytes.length;
+        bytes = ImageUtils.compress(bytes, suffix);
+        // ⚠️ 从这里开始 bytes 已是"最终上库的内容"—— 下面的 size / readSize / COS 上传
+        //    全部基于它，不能再用 file.getSize()（那是压缩前的原始大小）
+        if (bytes.length < originalSize) {
+            log.info("图片压缩生效：{} -> {} 字节（节省 {}%）",
+                    originalSize, bytes.length,
+                    100 - bytes.length * 100 / originalSize);
+        }
+
         String imageName = resolveImageName(name, file.getOriginalFilename());
         if (imageName.length() > 256) {
             throw new BusinessException(ErrorCode.PARAMS_ERROR, "图片名称不能超过 256 个字符");
@@ -231,14 +244,14 @@ public class ImageServiceImpl extends ServiceImpl<ImageMapper, Image> implements
             throw new BusinessException(ErrorCode.SYSTEM_ERROR,
                     "对象存储未配置，无法上传（请在 application-local.yml 中配置 cos.client.*）");
         }
-        String key = cosManager.upload(file, suffix);
+        String key = cosManager.upload(bytes, suffix, file.getContentType());
         String url = cosManager.buildUrl(key);
 
         // ========== 阶段三：落库 ==========
         Image image = new Image();
         image.setUrl(url);
         image.setName(imageName);
-        image.setPicSize(file.getSize());
+        image.setPicSize((long) bytes.length);
         image.setPicFormat(suffix);
         image.setCreateTime(new Date());
         // 宽高 / 宽高比：webp 用 JDK 的 ImageIO 读不出来，那就留 null。
@@ -267,7 +280,7 @@ public class ImageServiceImpl extends ServiceImpl<ImageMapper, Image> implements
         }
 
         log.info("上传图片成功：imageId={}, userId={}, size={}字节",
-                image.getId(), loginUser.getId(), file.getSize());
+                image.getId(), loginUser.getId(), image.getPicSize());
         return toImageVO(image);
     }
 
