@@ -1,6 +1,7 @@
 package com.huang.yupicture.tmp;
 
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
+import com.huang.yupicture.constant.ImageConstant;
 import com.huang.yupicture.model.entity.Image;
 import com.huang.yupicture.service.ImageService;
 import jakarta.annotation.Resource;
@@ -47,6 +48,18 @@ class ColorFamilySmokeTest {
         }
         System.out.println("[核验] 总图数=" + all.size() + "，无主色=" + nullColor + "，无色系=" + nullFamily);
         byFamily.forEach((family, count) -> System.out.println("[核验] 色系 " + family + " = " + count + " 张"));
+
+        // 主页浏览视角只显示「已通过」的图，用户点色块看到的数字来自这一层 ——
+        // 报「点白色能筛出几张」必须用这个口径，否则会把可见性过滤当成筛选 bug
+        Map<String, Integer> byFamilyPassed = new LinkedHashMap<>();
+        for (Image image : all) {
+            if (image.getReviewStatus() != null && image.getReviewStatus() == ImageConstant.REVIEW_STATUS_PASS
+                    && image.getPicColorFamily() != null) {
+                byFamilyPassed.merge(image.getPicColorFamily(), 1, Integer::sum);
+            }
+        }
+        System.out.println("[核验] 已通过图按色系（=主页点色块应看到的数量）：");
+        byFamilyPassed.forEach((family, count) -> System.out.println("[核验]   已通过 " + family + " = " + count + " 张"));
 
         // 不变式：回填跑完不该再有「有主色却没有色系」的图（那类图在筛选里会永远隐身）
         Assertions.assertEquals(0, nullFamily,
