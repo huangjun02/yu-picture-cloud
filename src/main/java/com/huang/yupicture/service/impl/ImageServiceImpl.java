@@ -33,9 +33,10 @@ import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.io.IOException;
-import java.util.Date;
 import java.util.ArrayList;
+import java.util.Date;
 import java.util.List;
+import java.util.Locale;
 import java.util.Objects;
 import java.util.stream.Collectors;
 
@@ -126,6 +127,11 @@ public class ImageServiceImpl extends ServiceImpl<ImageMapper, Image> implements
         applyTagsFilter(wrapper, imageQueryRequest.getTags());
         if (!ParamUtils.isBlank(imageQueryRequest.getPicFormat())) {
             wrapper.eq(Image::getPicFormat, imageQueryRequest.getPicFormat());
+        }
+        // 主色调筛选（精确匹配）。格式不合法报 40000 而不是静默忽略：
+        // 用户明确选了颜色却搜出全部图，等于筛选失效还不报错（与标签数组的处理同一立场）
+        if (!ParamUtils.isBlank(imageQueryRequest.getPicColor())) {
+            wrapper.eq(Image::getPicColor, normalizeColor(imageQueryRequest.getPicColor()));
         }
 
         // 审核状态筛选（本人 / 管理员都可用：管理员看整个待办队列，本人看自己哪张被拒了）
@@ -490,6 +496,15 @@ public class ImageServiceImpl extends ServiceImpl<ImageMapper, Image> implements
             image.setPicHeight(size[1]);
             image.setPicScale((double) size[0] / size[1]);
         }
+        // ========== 主色调（按颜色搜索的检索维度） ==========
+        // 与缩略图 / WebP 同一条纪律：提取失败返回 null 只记日志降级，绝不阻断上传。
+        // null 的语义是「这张图不参与颜色筛选」，存量图（本功能之前传的）同样是 null —— 一致。
+        String mainColor = ImageUtils.extractMainColor(bytes);
+        if (mainColor != null) {
+            image.setPicColor(mainColor);
+        } else {
+            log.warn("主色提取失败，该图不参与颜色筛选：name={}", imageName);
+        }
         image.setUserId(loginUser.getId());
         // ========== 审核状态的初始值：按「谁传的」分流（官方流程） ==========
         // 管理员传的图不存在「管理员审自己」这一环，直接过审并补齐审核参数；
@@ -614,6 +629,7 @@ public class ImageServiceImpl extends ServiceImpl<ImageMapper, Image> implements
         imageVO.setPicWidth(image.getPicWidth());
         imageVO.setPicHeight(image.getPicHeight());
         imageVO.setPicScale(image.getPicScale());
+        imageVO.setPicColor(image.getPicColor());
         imageVO.setPicFormat(image.getPicFormat());
         imageVO.setUserId(String.valueOf(image.getUserId()));
         imageVO.setCreateTime(image.getCreateTime());
@@ -836,6 +852,22 @@ public class ImageServiceImpl extends ServiceImpl<ImageMapper, Image> implements
             // 序列化 List<String> 不会失败；真失败说明环境有问题，不该静默写脏数据
             throw new BusinessException(ErrorCode.SYSTEM_ERROR, "标签保存失败");
         }
+    }
+
+    /**
+     * 颜色值归一化：去空白、统一大写、校验 {@code #RRGGBB} 格式。
+     *
+     * <p>入库时 {@code extractMainColor} 固定产出大写，查询侧把前端传来的小写
+     * 归一化后再比对（比在 SQL 里用 LOWER 更省 —— 走得动 idx_picColor 索引）。
+     * 格式不对报 40000：色板给的标准色不可能不合法，能传出不合法值说明是
+     * 拼出来的请求，静默忽略等于筛选悄悄失效。
+     */
+    private String normalizeColor(String picColor) {
+        String trimmed = picColor.trim().toUpperCase(Locale.ROOT);
+        if (!trimmed.matches("^#[0-9A-F]{6}$")) {
+            throw new BusinessException(ErrorCode.PARAMS_ERROR, "颜色格式不正确，应为 #RRGGBB");
+        }
+        return trimmed;
     }
 
     private void applyTagsFilter(LambdaQueryWrapper<Image> wrapper, String tags) {
