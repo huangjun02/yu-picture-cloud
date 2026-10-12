@@ -25,6 +25,7 @@ import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
@@ -485,5 +486,69 @@ class ImageControllerTest {
                 .andExpect(jsonPath("$.code").value(40400));
         mockMvc.perform(post("/image/download").cookie(ownerCookie).param("id", "abc"))
                 .andExpect(jsonPath("$.code").value(40000));
+    }
+
+    @Test
+    void reviewShouldRequireAdminAndReasonForReject() throws Exception {
+        long ownerId = prepareUser("img_t_owner16", "user");
+        Cookie ownerCookie = loginAndGetCookie("img_t_owner16");
+        long imageId = prepareImage(ownerId, "待审核的图", "风景");
+
+        // ① 普通用户审核 → 无权限（40101）：审核是管理员专属
+        mockMvc.perform(post("/image/review").cookie(ownerCookie)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"id\":\"" + imageId + "\",\"reviewStatus\":1}"))
+                .andExpect(jsonPath("$.code").value(40101));
+
+        // ② 管理员拒绝但不填原因 → 40000：没有理由的拒绝比拒绝本身更伤人
+        prepareUser("img_t_admin16", "admin");
+        Cookie adminCookie = loginAndGetCookie("img_t_admin16");
+        mockMvc.perform(post("/image/review").cookie(adminCookie)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"id\":\"" + imageId + "\",\"reviewStatus\":2}"))
+                .andExpect(jsonPath("$.code").value(40000));
+
+        // ③ 管理员合法审核（拒绝 + 原因）→ code=0，且审核四字段落库
+        mockMvc.perform(post("/image/review").cookie(adminCookie)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"id\":\"" + imageId + "\",\"reviewStatus\":2,\"reviewMessage\":\"内容不合适\"}"))
+                .andExpect(jsonPath("$.code").value(0));
+
+        Image after = imageService.getById(imageId);
+        assertEquals(2, after.getReviewStatus(), "审核结论要落库");
+        assertEquals("内容不合适", after.getReviewMessage(), "拒绝原因要落库");
+        assertNotNull(after.getReviewerId(), "审核人要留痕");
+        assertNotNull(after.getReviewTime(), "审核时间要留痕");
+        assertEquals(String.valueOf(ownerId), String.valueOf(after.getUserId()), "审核不能动归属");
+        assertEquals("待审核的图", after.getName(), "审核不能改图的内容");
+
+        // ④ 管理员复查改判为通过：允许（申诉场景）；但状态值只能是 1/2
+        mockMvc.perform(post("/image/review").cookie(adminCookie)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"id\":\"" + imageId + "\",\"reviewStatus\":1}"))
+                .andExpect(jsonPath("$.code").value(0));
+        assertEquals(1, imageService.getById(imageId).getReviewStatus(), "复查改判要生效");
+
+        // ⑤ 非法状态值 → 40000
+        mockMvc.perform(post("/image/review").cookie(adminCookie)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"id\":\"" + imageId + "\",\"reviewStatus\":9}"))
+                .andExpect(jsonPath("$.code").value(40000));
+    }
+
+    @Test
+    void newUploadShouldDefaultToPendingReview() throws Exception {
+        long ownerId = prepareUser("img_t_owner17", "user");
+        Cookie cookie = loginAndGetCookie("img_t_owner17");
+        long imageId = prepareImage(ownerId, "新传的图", "风景");
+
+        Image image = imageService.getById(imageId);
+        assertEquals(0, image.getReviewStatus(), "先过后审：新图默认待审核（0）");
+        assertNull(image.getReviewerId(), "没审过就没有审核人");
+
+        // 列表接口返回的 VO 要带审核状态（管理员工作台 + 用户看自己图的进度）
+        mockMvc.perform(post("/image/get").cookie(cookie).param("id", String.valueOf(imageId)))
+                .andExpect(jsonPath("$.code").value(0))
+                .andExpect(jsonPath("$.data.reviewStatus").value(0));
     }
 }

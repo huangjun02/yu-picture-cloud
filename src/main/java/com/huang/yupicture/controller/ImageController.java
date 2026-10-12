@@ -5,6 +5,7 @@ import com.huang.yupicture.common.BaseResponse;
 import com.huang.yupicture.common.ResultUtils;
 import com.huang.yupicture.model.dto.image.ImageDownloadResult;
 import com.huang.yupicture.model.dto.image.ImageQueryRequest;
+import com.huang.yupicture.model.dto.image.ImageReviewRequest;
 import com.huang.yupicture.model.dto.image.ImageUpdateRequest;
 import com.huang.yupicture.model.vo.ImageVO;
 import com.huang.yupicture.service.ImageService;
@@ -121,6 +122,33 @@ public class ImageController {
                 .header(HttpHeaders.CONTENT_DISPOSITION, disposition.toString())
                 .contentLength(result.getBytes().length)
                 .body(result.getBytes());
+    }
+
+    /**
+     * URL 传图（本人）。
+     *
+     * <p>服务器替用户拉取远端图片，后续处理与文件上传一致。
+     * 参数走 URL 而不是请求体：与 delete/get 同款 ——
+     * 单字段走 URL 参数是本项目的既定约定（fileUrl 可能带特殊字符，前端要 encodeURIComponent）。
+     */
+    @PostMapping("/upload/url")
+    @Operation(summary = "URL 传图（拉取远端图片，本人）")
+    public BaseResponse<ImageVO> uploadImageByUrl(@RequestParam String fileUrl,
+                                                  @RequestParam(value = "name", required = false) String name) {
+        return ResultUtils.success(imageService.uploadImageByUrl(fileUrl, name));
+    }
+
+    /**
+     * 审核图片（管理员）。
+     *
+     * <p>三个参数都在请求体：审核结果是"一次提交"（id + 结论 + 意见同属一次动作），
+     * 与 update 同款的多字段语义。
+     */
+    @PostMapping("/review")
+    @Operation(summary = "审核图片（管理员）")
+    public BaseResponse<Boolean> reviewImage(@RequestBody ImageReviewRequest reviewRequest) {
+        return ResultUtils.success(imageService.reviewImage(
+                reviewRequest.getId(), reviewRequest.getReviewStatus(), reviewRequest.getReviewMessage()));
     }
 
     /**

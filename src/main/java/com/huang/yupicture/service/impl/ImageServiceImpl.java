@@ -5,6 +5,7 @@ import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.baomidou.mybatisplus.spring.service.impl.ServiceImpl;
 import com.huang.yupicture.common.BusinessException;
 import com.huang.yupicture.common.ErrorCode;
+import com.huang.yupicture.constant.ImageConstant;
 import com.huang.yupicture.constant.UserConstant;
 import com.huang.yupicture.manager.CosManager;
 import com.huang.yupicture.mapper.ImageMapper;
@@ -18,6 +19,7 @@ import com.huang.yupicture.service.ImageService;
 import com.huang.yupicture.service.UserService;
 import com.huang.yupicture.utils.ImageUtils;
 import com.huang.yupicture.utils.ParamUtils;
+import com.huang.yupicture.utils.UrlPictureUtils;
 import jakarta.annotation.Resource;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -250,6 +252,150 @@ public class ImageServiceImpl extends ServiceImpl<ImageMapper, Image> implements
         if (imageName.length() > 256) {
             throw new BusinessException(ErrorCode.PARAMS_ERROR, "图片名称不能超过 256 个字符");
         }
+        return persistProcessedImage(loginUser, bytes, suffix, imageName, file.getContentType());
+    }
+
+    /**
+     * URL 传图：服务器替用户去拉远端图片，后续处理与文件上传完全一致。
+     *
+     * <p><b>与文件上传的三点差异（只差这三点，汇合点之后严格一致）：</b>
+     * <ol>
+     *   <li>字节来源：HttpUtil 拉远端，而不是读 MultipartFile</li>
+     *   <li>后缀推断：URL 路径尾段可能没有后缀（很多图床是 /abc123 无后缀）——
+     *       推断不出时<b>不猜</b>，用魔数反推：真 jpg 的头是 FF D8 FF，能唯一确定格式</li>
+     *   <li>名称兜底：URL 路径尾段（很多图床的尾段是无意义哈希，用户传了 name 就覆盖）</li>
+     * </ol>
+     *
+     * <p><b>SSRF 防线在 {@link UrlPictureUtils#checkUrl}</b>：内网 / 回环 /
+     * 云元数据地址在发起请求之前就拒绝。防线必须在"发请求"之前 ——
+     * 拉完再判等于已经把请求发出去了，防线形同虚设。
+     *
+     * <p><b>超时必须显式设</b>：Hutool 默认不超时，一个慢速外站能把 Tomcat
+     * 工作线程挂住几十秒 —— 几个恶意请求就能耗光线程池。
+     */
+    @Override
+    public ImageVO uploadImageByUrl(String fileUrl, String name) {
+        User loginUser = userService.getLoginUser();
+
+        // ① URL 形状校验（协议 / 主机 / SSRF）—— 在发请求之前
+        java.net.URI uri = UrlPictureUtils.checkUrl(fileUrl);
+
+        // ② 拉取（JDK 内置 HttpClient，零新依赖 —— 为一个"拉字节"引 Hutool 不划算）。
+        //    显式超时：连接 5s / 读取 10s。不设超时的话一个慢速外站能把 Tomcat
+        //    工作线程挂住几十秒 —— 几个恶意请求就能耗光线程池。
+        byte[] bytes;
+        try {
+            java.net.http.HttpClient client = java.net.http.HttpClient.newBuilder()
+                    .connectTimeout(java.time.Duration.ofSeconds(5))
+                    .followRedirects(java.net.http.HttpClient.Redirect.NORMAL)  // 跟 301/302（图床常重定向），但只跟同协议公网（JDK 不跟 https→http 降级）
+                    .build();
+            java.net.http.HttpRequest request = java.net.http.HttpRequest.newBuilder()
+                    .uri(uri)
+                    .timeout(java.time.Duration.ofSeconds(10))
+                    .GET()
+                    .build();
+            java.net.http.HttpResponse<byte[]> response =
+                    client.send(request, java.net.http.HttpResponse.BodyHandlers.ofByteArray());
+            if (response.statusCode() != 200) {
+                throw new BusinessException(ErrorCode.PARAMS_ERROR,
+                        "图片拉取失败（远端返回 " + response.statusCode() + "）");
+            }
+            bytes = response.body();
+        } catch (BusinessException e) {
+            throw e;
+        } catch (Exception e) {
+            log.warn("拉取远程图片失败：url={}", fileUrl, e);
+            throw new BusinessException(ErrorCode.PARAMS_ERROR, "图片拉取失败，请确认地址可访问");
+        }
+        if (bytes == null || bytes.length == 0) {
+            throw new BusinessException(ErrorCode.PARAMS_ERROR, "远端地址没有返回内容");
+        }
+        if (bytes.length > UrlPictureUtils.MAX_URL_IMAGE_SIZE) {
+            throw new BusinessException(ErrorCode.PARAMS_ERROR, "图片大小不能超过 5MB");
+        }
+
+        // ③ 内容判定：魔数是唯一权威。URL 后缀只做"线索"，做不了"证据"
+        String suffix = resolveSuffixFromUrl(uri);
+        if (suffix == null) {
+            suffix = ImageUtils.detectSuffixByMagic(bytes);
+            if (suffix == null) {
+                throw new BusinessException(ErrorCode.PARAMS_ERROR,
+                        "无法识别图片格式（地址无后缀且内容不是 jpg/png/webp）");
+            }
+        }
+        // 魔数复核：远端自称 jpg 实际是别的格式 → 拒绝（与文件上传同一条铁律）
+        ImageUtils.checkContent(bytes, suffix);
+
+        String imageName = resolveImageName(name, extractFileNameFromUrl(uri));
+        return persistProcessedImage(loginUser, bytes, suffix, imageName, null);
+    }
+
+    /**
+     * 从 URL 路径尾段推断后缀。
+     *
+     * <p>只信路径部分（{@code getPath}），不信 query ——
+     * {@code https://cdn.example.com/abc.jpg?token=xxx} 的尾段是 {@code abc.jpg}；
+     * 而 {@code https://api.example.com/img?format=jpg} 的"后缀"在参数里，
+     * 那是服务端行为不是文件名，不能当依据。
+     *
+     * @return 小写后缀（jpg/png/webp 之一）；推断不出返回 null（交给魔数反推）
+     */
+    private String resolveSuffixFromUrl(java.net.URI uri) {
+        String path = uri.getPath();
+        if (ParamUtils.isBlank(path)) {
+            return null;
+        }
+        int slash = path.lastIndexOf('/');
+        String tail = slash >= 0 ? path.substring(slash + 1) : path;
+        int dot = tail.lastIndexOf('.');
+        if (dot < 0 || dot == tail.length() - 1) {
+            return null;
+        }
+        String suffix = tail.substring(dot + 1).toLowerCase(java.util.Locale.ROOT);
+        return ImageUtils.isSupportedSuffix(suffix) ? suffix : null;
+    }
+
+    /** URL 传图的名称兜底：路径尾段（通常是文件名）；空就交给 resolveImageName 的"未命名图片" */
+    private String extractFileNameFromUrl(java.net.URI uri) {
+        String path = uri.getPath();
+        if (ParamUtils.isBlank(path)) {
+            return "";
+        }
+        int slash = path.lastIndexOf('/');
+        String tail = slash >= 0 ? path.substring(slash + 1) : path;
+        int dot = tail.lastIndexOf('.');
+        return dot > 0 ? tail.substring(0, dot) : tail;
+    }
+
+    /**
+     * 上传处理链的「汇合点」：从魔数校验通过之后的每一步（压缩 → COS → 派生文件 → 落库）。
+     *
+     * <p>抽出来的判据就是那条老规矩 ——「第二处出现时立刻抽」：文件上传（uploadImage）
+     * 和 URL 传图（uploadImageByUrl）两条入口，从"拿到字节 + 确定后缀"开始，
+     * 后面的每一步完全一致。两条路各写一遍 = 改压缩逻辑时必然漏一边。
+     *
+     * <p>入口差异（各自的 uploadImage / uploadImageByUrl 负责）：
+     * <ul>
+     *   <li>字节从哪来：文件读 MultipartFile / URL 拉远端</li>
+     *   <li>后缀怎么定：文件看原始文件名 / URL 看路径尾部（拉取后用魔数复核）</li>
+     *   <li>名称兜底：文件用原始文件名 / URL 用主机 + 路径尾段</li>
+     * </ul>
+     * 汇合点之后（含）的所有行为两条路严格一致 —— 这是"同一个业务只有一个标准"的落点。
+     */
+    private ImageVO persistProcessedImage(User loginUser, byte[] bytes, String suffix,
+                                          String imageName, String contentType) {
+        // ========== 阶段一点五：压缩（在魔数校验之后、存储之前） ==========
+        // 位置有讲究：放在校验之前 = 白白压缩将被拒绝的文件；放在落库之后 = 压缩失去意义。
+        // 校验已保证"这是一张真图"，此时压缩正好夹在"确认值得处理"和"付出存储成本"之间。
+        long originalSize = bytes.length;
+        bytes = ImageUtils.compress(bytes, suffix);
+        // ⚠️ 从这里开始 bytes 已是"最终上库的内容"—— 下面的 size / readSize / COS 上传
+        //    全部基于它，不能再用 file.getSize()（那是压缩前的原始大小）
+        if (bytes.length < originalSize) {
+            log.info("图片压缩生效：{} -> {} 字节（节省 {}%）",
+                    originalSize, bytes.length,
+                    100 - bytes.length * 100 / originalSize);
+        }
 
         // ========== 阶段二：上传对象存储 ==========
         // 存储可用性检查特意放在参数校验之后：参数不对是最常见的情况，应当先报 40000；
@@ -258,10 +404,8 @@ public class ImageServiceImpl extends ServiceImpl<ImageMapper, Image> implements
             throw new BusinessException(ErrorCode.SYSTEM_ERROR,
                     "对象存储未配置，无法上传（请在 application-local.yml 中配置 cos.client.*）");
         }
-        String key = cosManager.upload(bytes, suffix, file.getContentType());
-        String url = cosManager.buildUrl(key);
-
-        // ========== 阶段二点五：缩略图（增强，不是主功能） ==========
+        String key = cosManager.upload(bytes, suffix, contentType);
+        String url = cosManager.buildUrl(key);        // ========== 阶段二点五：缩略图（增强，不是主功能） ==========
         // 生成 / 上传失败只记 warn 降级：缩略图挂了列表页回退原图，主功能"能传图"不受连坐。
         // 对比原图上传（失败必须抛）：原图是用户要的核心产物，缩略图是派生产物，
         // 派生物的失败不该让核心操作白跑。
@@ -306,6 +450,9 @@ public class ImageServiceImpl extends ServiceImpl<ImageMapper, Image> implements
             image.setPicScale((double) size[0] / size[1]);
         }
         image.setUserId(loginUser.getId());
+        // 先过后审：任何入口传上来的图都从"待审核"开始（requirements 拍板：
+        // 审核是事后管理不是准入门槛 —— 图照常可看可用，管理员有空再审）
+        image.setReviewStatus(ImageConstant.REVIEW_STATUS_PENDING);
 
         boolean result = this.save(image);
         if (!result) {
@@ -360,6 +507,8 @@ public class ImageServiceImpl extends ServiceImpl<ImageMapper, Image> implements
         ImageVO imageVO = new ImageVO();
         // 雪花 id 一律字符串化：19 位 Long 直出给 JS 会丢精度（末尾几位变 0）
         imageVO.setId(String.valueOf(image.getId()));
+        imageVO.setReviewStatus(image.getReviewStatus());
+        imageVO.setReviewMessage(image.getReviewMessage());
         imageVO.setUrl(image.getUrl());
         // thumbnailUrl 是推导出来的，不是表里的列 —— 库里只存原图地址这一个"事实"，
         // 派生信息在使用时现算，两处数据永远不会对不上
@@ -382,6 +531,53 @@ public class ImageServiceImpl extends ServiceImpl<ImageMapper, Image> implements
     }
 
     // ==================== 权限相关（本模块的重点） ====================
+
+    /**
+     * 审核图片（管理员）。
+     *
+     * <p>状态机：待审核(0) → 通过(1) / 拒绝(2)。允许「拒绝后再改成通过」
+     * （用户申诉改了图、管理员复查），不允许任何状态回到"待审核"——
+     * 审核是一次有记录的动作，"撤销成没审过"等于抹掉审核痕迹。
+     *
+     * <p>审核是"标注 + 记录"，不改图的内容与归属 —— 所以只 set 审核四字段，
+     * 不碰 name / url / userId。
+     */
+    @Override
+    public boolean reviewImage(String id, Integer reviewStatus, String reviewMessage) {
+        userService.checkAdminUser();
+        if (reviewStatus == null
+                || (reviewStatus != ImageConstant.REVIEW_STATUS_PASS
+                && reviewStatus != ImageConstant.REVIEW_STATUS_REJECT)) {
+            throw new BusinessException(ErrorCode.PARAMS_ERROR, "审核状态只能是 通过/拒绝");
+        }
+        if (reviewStatus == ImageConstant.REVIEW_STATUS_REJECT
+                && ParamUtils.isBlank(reviewMessage)) {
+            throw new BusinessException(ErrorCode.PARAMS_ERROR, "拒绝时必须填写原因");
+        }
+
+        long imageId = ParamUtils.parseId(id);
+        Image image = this.getById(imageId);
+        if (image == null) {
+            throw new BusinessException(ErrorCode.NOT_FOUND_ERROR, "图片不存在");
+        }
+
+        User reviewer = userService.getLoginUser();
+        Image updateImage = new Image();
+        updateImage.setId(image.getId());
+        updateImage.setReviewStatus(reviewStatus);
+        updateImage.setReviewMessage(ParamUtils.isBlank(reviewMessage) ? null : reviewMessage.trim());
+        updateImage.setReviewerId(reviewer.getId());
+        updateImage.setReviewTime(new Date());
+        // 只 set 审核四字段（NOT_NULL 策略自动跳过 null）—— 审核动不了图的内容和归属
+        boolean result = this.updateById(updateImage);
+        if (!result) {
+            throw new BusinessException(ErrorCode.OPERATION_ERROR, "审核失败");
+        }
+        log.info("图片审核完成：imageId={}, result={}, reviewerId={}",
+                imageId, reviewStatus == ImageConstant.REVIEW_STATUS_PASS ? "通过" : "拒绝",
+                reviewer.getId());
+        return true;
+    }
 
     @Override
     public ImageDownloadResult downloadImage(String id) {

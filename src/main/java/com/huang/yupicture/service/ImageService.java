@@ -33,6 +33,25 @@ public interface ImageService extends IService<Image> {
     ImageVO getImageById(String id);
 
     /**
+     * URL 传图：后端拉取远端图片，处理链与文件上传一致（压缩 / 缩略图 / webp / 落库）。
+     *
+     * @param fileUrl 图片地址（仅公网 http/https，SSRF 校验在 {@code UrlPictureUtils}）
+     * @param name    图片名称（可选；不传用 URL 路径尾段）
+     * @return 新图片的脱敏信息
+     */
+    ImageVO uploadImageByUrl(String fileUrl, String name);
+
+    /**
+     * 审核图片（管理员）：通过 / 拒绝。
+     *
+     * @param id            图片 id
+     * @param reviewStatus  审核结果：1-通过 / 2-拒绝（其它值报参数错误）
+     * @param reviewMessage 审核意见（拒绝时必填 —— 没有理由的拒绝比拒绝本身更伤人）
+     * @return 是否成功
+     */
+    boolean reviewImage(String id, Integer reviewStatus, String reviewMessage);
+
+    /**
      * 下载图片文件（本人或管理员）。
      *
      * <p>与查询接口同一套归属校验 —— 「能看就能下载」，反之「看不了也下不了」：

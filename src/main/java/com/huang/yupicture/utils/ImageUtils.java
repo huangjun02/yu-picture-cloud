@@ -124,6 +124,37 @@ public final class ImageUtils {
     public static final float COMPRESS_QUALITY = 0.8f;
 
     /**
+     * 按魔数反推格式（URL 传图用：地址没有后缀时，格式只能看内容）。
+     *
+     * <p>与 {@link #matchesMagic} 的区别：那个是「拿着用户声称的后缀来验证」，
+     * 这个是「没有任何声称，从内容里读出真相」。jpg 的头（FF D8 FF）、png 的头
+     * （89 50 4E 47）都是各自格式强约定的固定字节，能唯一反推。
+     *
+     * @return 小写后缀；认不出的格式返回 null（调用方报"无法识别"）
+     */
+    public static String detectSuffixByMagic(byte[] bytes) {
+        if (bytes == null || bytes.length < 12) {
+            return null;
+        }
+        if ((bytes[0] & 0xFF) == 0xFF && (bytes[1] & 0xFF) == 0xD8 && (bytes[2] & 0xFF) == 0xFF) {
+            return "jpg";
+        }
+        if ((bytes[0] & 0xFF) == 0x89 && bytes[1] == 'P' && bytes[2] == 'N' && bytes[3] == 'G') {
+            return "png";
+        }
+        if (bytes[0] == 'R' && bytes[1] == 'I' && bytes[2] == 'F' && bytes[3] == 'F'
+                && bytes[8] == 'W' && bytes[9] == 'E' && bytes[10] == 'B' && bytes[11] == 'P') {
+            return "webp";
+        }
+        return null;
+    }
+
+    /** 后缀是否在白名单内（URL 传图从路径尾段推断后缀后，先用它过滤一眼） */
+    public static boolean isSupportedSuffix(String suffix) {
+        return suffix != null && ALLOWED_SUFFIX.contains(suffix.toLowerCase(Locale.ROOT));
+    }
+
+    /**
      * 把图片压缩到指定质量（只降质量、不改尺寸）。
      *
      * <p><b>只对 JPEG 生效</b>，其余格式原样返回，各有明确原因：
