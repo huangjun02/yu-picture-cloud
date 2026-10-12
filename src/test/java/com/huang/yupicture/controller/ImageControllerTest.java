@@ -2,6 +2,7 @@ package com.huang.yupicture.controller;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.huang.yupicture.constant.ImageConstant;
 import com.huang.yupicture.model.entity.Image;
 import com.huang.yupicture.model.entity.User;
 import com.huang.yupicture.service.ImageService;
@@ -21,9 +22,11 @@ import org.springframework.test.web.servlet.MvcResult;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.nio.charset.StandardCharsets;
+import java.util.Date;
 import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -117,6 +120,16 @@ class ImageControllerTest {
 
     /** 带 tags 的重载（标签筛选用例用）：tags 存 JSON 数组字符串 */
     private long prepareImage(long userId, String name, String category, String[] tags) {
+        return prepareImage(userId, name, category, tags, ImageConstant.REVIEW_STATUS_PENDING);
+    }
+
+    /** 造一张「已通过」的图（浏览视角 / 可见性用例用） */
+    private long preparePassedImage(long userId, String name, String category) {
+        return prepareImage(userId, name, category, new String[]{"测试"}, ImageConstant.REVIEW_STATUS_PASS);
+    }
+
+    /** 全参数版：显式指定审核状态（默认待审核 —— 上传入口的初始值） */
+    private long prepareImage(long userId, String name, String category, String[] tags, int reviewStatus) {
         Image image = new Image();
         image.setUrl("https://test-bucket.cos.ap-shanghai.myqcloud.com/test/" + name + ".jpg");
         image.setName(name);
@@ -135,6 +148,7 @@ class ImageControllerTest {
         image.setPicScale(800.0 / 600.0);
         image.setPicFormat("jpg");
         image.setUserId(userId);
+        image.setReviewStatus(reviewStatus);
         imageService.save(image);
         return image.getId();
     }
@@ -162,13 +176,15 @@ class ImageControllerTest {
         long otherId = prepareUser("img_t_other1", "user");
         Cookie ownerCookie = loginAndGetCookie("img_t_owner1");
 
-        long baseTotal = totalOf(ownerCookie, "{}");
+        String mine = "{\"userId\":\"" + ownerId + "\"}";
+        long baseTotal = totalOf(ownerCookie, mine);
         prepareImage(ownerId, "我的图A", "风景");
         prepareImage(ownerId, "我的图B", "风景");
         prepareImage(otherId, "别人的图", "风景");
 
-        JsonNode data = listImages(ownerCookie, "{}").path("data");
-        assertEquals(baseTotal + 2, data.path("total").asLong(), "普通用户只能看到自己的 2 张图");
+        JsonNode data = listImages(ownerCookie, mine).path("data");
+        assertEquals(baseTotal + 2, data.path("total").asLong(),
+                "「我的图片」视角只该有自己那 2 张（自己的待审核图也要能看见）");
         for (JsonNode record : data.path("records")) {
             assertEquals(String.valueOf(ownerId), record.path("userId").asText(),
                     "结果里绝不能出现别人的图");
@@ -181,18 +197,32 @@ class ImageControllerTest {
         long otherId = prepareUser("img_t_other2", "user");
         Cookie ownerCookie = loginAndGetCookie("img_t_owner2");
 
-        long baseTotal = totalOf(ownerCookie, "{}");
-        prepareImage(ownerId, "我的图", "风景");
-        prepareImage(otherId, "别人的图", "风景");
+        long myPending = prepareImage(ownerId, "我的待审核图", "风景");
+        long otherPending = prepareImage(otherId, "别人的待审核图", "风景");
+        long otherPassed = preparePassedImage(otherId, "别人的已通过图", "风景");
 
         // 攻击姿势：普通用户手动传别人的 userId，试图"以别人的身份查询"
         JsonNode data = listImages(ownerCookie, "{\"userId\":\"" + otherId + "\"}").path("data");
 
-        assertEquals(baseTotal + 1, data.path("total").asLong(),
-                "传了别人的 userId 也只能看到自己的图（入参被 Service 覆盖）");
+        // 新语义：传别人的 userId 不报错也不越权，退化成「浏览」视角 —— 全站的已通过图。
+        // 关键断言是"没通过审核的图（不管是谁的）一张都不能露"，这才是防线的实质
         for (JsonNode record : data.path("records")) {
-            assertEquals(String.valueOf(ownerId), record.path("userId").asText());
+            assertNotEquals(String.valueOf(otherPending),
+                    record.path("id").asText(), "别人的待审核图绝不能出现在浏览结果里");
+            assertNotEquals(String.valueOf(myPending),
+                    record.path("id").asText(), "浏览视角下自己的待审核图也不该出现");
         }
+        assertTrue(hasRecord(data, otherPassed), "浏览视角应当看得见别人已通过的图（主页图墙）");
+    }
+
+    /** 小工具：结果集里有没有这张图 */
+    private boolean hasRecord(JsonNode data, long imageId) {
+        for (JsonNode record : data.path("records")) {
+            if (String.valueOf(imageId).equals(record.path("id").asText())) {
+                return true;
+            }
+        }
+        return false;
     }
 
     @Test
@@ -200,10 +230,18 @@ class ImageControllerTest {
         long ownerId = prepareUser("img_t_owner3", "user");
         prepareUser("img_t_other3", "user");
         Cookie otherCookie = loginAndGetCookie("img_t_other3");
-        long imageId = prepareImage(ownerId, "别人的图", "风景");
+        long pendingId = prepareImage(ownerId, "别人没通过审核的图", "风景");
+        long passedId = preparePassedImage(ownerId, "别人已通过的图", "风景");
 
-        mockMvc.perform(post("/image/get").cookie(otherCookie).param("id", String.valueOf(imageId)))
-                .andExpect(jsonPath("$.code").value(40101));
+        // 没通过审核的图：报「不存在」（40400）而不是「无权限」——
+        // 报无权限等于告诉对方"这张图确实存在"，连存在性都不该暴露
+        mockMvc.perform(post("/image/get").cookie(otherCookie).param("id", String.valueOf(pendingId)))
+                .andExpect(jsonPath("$.code").value(40400));
+
+        // 已通过的图：主页图墙里的图，谁都能看（官方流程的「内容可见性」）
+        mockMvc.perform(post("/image/get").cookie(otherCookie).param("id", String.valueOf(passedId)))
+                .andExpect(jsonPath("$.code").value(0))
+                .andExpect(jsonPath("$.data.name").value("别人已通过的图"));
     }
 
     @Test
@@ -301,7 +339,7 @@ class ImageControllerTest {
         }
 
         // 前端狮子大开口要 1000 条：必须被夹到上限 20（requirements 6.2）
-        JsonNode data = listImages(cookie, "{\"pageSize\":1000}").path("data");
+        JsonNode data = listImages(cookie, "{\"userId\":\"" + ownerId + "\",\"pageSize\":1000}").path("data");
         assertEquals(20, data.path("size").asLong(), "每页条数必须被夹到上限 20");
         assertEquals(20, data.path("records").size(), "一次最多返回 20 条");
     }
@@ -315,11 +353,11 @@ class ImageControllerTest {
         prepareImage(ownerId, "杭州小笼包", "美食");
 
         // 模糊匹配名称
-        JsonNode byName = listImages(cookie, "{\"name\":\"杭州\"}").path("data");
+        JsonNode byName = listImages(cookie, "{\"userId\":\"" + ownerId + "\",\"name\":\"杭州\"}").path("data");
         assertEquals(baseCount(ownerId, byName), byName.path("records").size());
 
         // 精确匹配分类
-        JsonNode byCategory = listImages(cookie, "{\"category\":\"美食\"}").path("data");
+        JsonNode byCategory = listImages(cookie, "{\"userId\":\"" + ownerId + "\",\"category\":\"美食\"}").path("data");
         for (JsonNode record : byCategory.path("records")) {
             assertEquals("美食", record.path("category").asText(), "分类是精确匹配，不能带出别的分类");
         }
@@ -343,17 +381,17 @@ class ImageControllerTest {
         prepareImage(ownerId, "红烧肉", "美食", new String[]{"美食", "硬菜"});
 
         // ① 单标签：两两张「风景」都该出来（含黄山和西湖）
-        JsonNode bySingle = listImages(cookie, "{\"tags\":\"风景\"}").path("data");
+        JsonNode bySingle = listImages(cookie, "{\"userId\":\"" + ownerId + "\",\"tags\":\"风景\"}").path("data");
         assertEquals(2, bySingle.path("records").size(), "单标签模糊匹配应命中两张风景图");
 
         // ② 多选 AND：["风景","山"] 只该命中黄山（西湖没"山"标签）
-        JsonNode byMulti = listImages(cookie, "{\"tags\":\"[\\\"风景\\\",\\\"山\\\"]\"}").path("data");
+        JsonNode byMulti = listImages(cookie, "{\"userId\":\"" + ownerId + "\",\"tags\":\"[\\\"风景\\\",\\\"山\\\"]\"}").path("data");
         assertEquals(1, byMulti.path("records").size(), "多选 AND 应只命中同时带两个标签的图");
         assertEquals("黄山云海", byMulti.path("records").get(0).path("name").asText());
 
         // ③ 带引号定界的子串误报防线：查「山」不应带出「硬菜」（都不是对方子串，
         //    但查「菜」若裸匹配会命中「硬菜」——这里验证引号定界下单标签也精确）
-        JsonNode byDish = listImages(cookie, "{\"tags\":\"菜\"}").path("data");
+        JsonNode byDish = listImages(cookie, "{\"userId\":\"" + ownerId + "\",\"tags\":\"菜\"}").path("data");
         assertEquals(1, byDish.path("records").size());
         assertEquals("红烧肉", byDish.path("records").get(0).path("name").asText());
 
@@ -445,10 +483,10 @@ class ImageControllerTest {
         Cookie cookie = loginAndGetCookie("img_t_owner14");
         long imageId = prepareImage(ownerId, "删了就该消失", "风景");
 
-        long before = totalOf(cookie, "{}");
+        long before = totalOf(cookie, "{\"userId\":\"" + ownerId + "\"}");
         mockMvc.perform(post("/image/delete").cookie(cookie).param("id", String.valueOf(imageId)))
                 .andExpect(jsonPath("$.code").value(0));
-        long after = totalOf(cookie, "{}");
+        long after = totalOf(cookie, "{\"userId\":\"" + ownerId + "\"}");
 
         assertEquals(before - 1, after, "逻辑删除后列表总数要减 1（不能被查出来）");
         assertNotEquals(before, after);
@@ -457,7 +495,8 @@ class ImageControllerTest {
     /**
      * 下载接口的纯逻辑用例（不连 COS —— 依赖外部服务的能力不进测试）：
      * <ul>
-     *   <li>别人的图 → 40101（下载是"读"，权限与查询一致）</li>
+     *   <li>别人<b>未通过审核</b>的图 → 40400（下载是"读"，可见性与查询一致）</li>
+     *   <li>别人<b>已通过</b>的图 → 权限放行、走到存储层（能看就能下载）</li>
      *   <li>不存在的 id → 40400</li>
      *   <li>格式错的 id → 40000</li>
      * </ul>
@@ -468,17 +507,23 @@ class ImageControllerTest {
     void downloadImageShouldCheckOwnerAndParams() throws Exception {
         long ownerId = prepareUser("img_t_owner15", "user");
         Cookie ownerCookie = loginAndGetCookie("img_t_owner15");
-        long imageId = prepareImage(ownerId, "别人的图", "风景");
+        long pendingId = prepareImage(ownerId, "别人没通过审核的图", "风景");
+        long passedId = preparePassedImage(ownerId, "别人已通过的图", "风景");
 
-        // ① 其他人下载 → 40101 无权（先有图，第二个用户来下）
         prepareUser("img_t_other15", "user");
         Cookie otherCookie = loginAndGetCookie("img_t_other15");
-        mockMvc.perform(post("/image/download").cookie(otherCookie).param("id", String.valueOf(imageId)))
-                .andExpect(jsonPath("$.code").value(40101));
 
-        // ② 本人下载：权限过了，但 MockMvc 环境没有 COS 配置 → SYSTEM_ERROR（50000）
-        //    这一步证明的是"权限校验已通过、走到了存储层"——如果权限没过，报的会是 40101
-        mockMvc.perform(post("/image/download").cookie(ownerCookie).param("id", String.valueOf(imageId)))
+        // ① 别人下载未通过审核的图 → 40400（看不见的东西也下不了）
+        mockMvc.perform(post("/image/download").cookie(otherCookie).param("id", String.valueOf(pendingId)))
+                .andExpect(jsonPath("$.code").value(40400));
+
+        // ② 别人下载已通过的图：可见性放行，停在存储层（MockMvc 环境没有 COS 配置 → 50000）。
+        //    这一步证明的是"权限校验已通过、走到了存储层"——若权限没过，报的会是 40400
+        mockMvc.perform(post("/image/download").cookie(otherCookie).param("id", String.valueOf(passedId)))
+                .andExpect(jsonPath("$.code").value(50000));
+
+        // ③ 本人下载自己的图：同样走到存储层
+        mockMvc.perform(post("/image/download").cookie(ownerCookie).param("id", String.valueOf(pendingId)))
                 .andExpect(jsonPath("$.code").value(50000));
 
         // ③ 不存在 / 格式错
@@ -550,5 +595,180 @@ class ImageControllerTest {
         mockMvc.perform(post("/image/get").cookie(cookie).param("id", String.valueOf(imageId)))
                 .andExpect(jsonPath("$.code").value(0))
                 .andExpect(jsonPath("$.data.reviewStatus").value(0));
+    }
+
+    // ==================== 四、审核流（对齐官方流程） ====================
+
+    /**
+     * 管理员更新图片 → 自动过审，并自动补齐审核参数。
+     *
+     * <p>为什么管理员要有"自动过审"这条捷径：管理员改自己的图还要自己审自己，
+     * 是纯多余的流程；而管理员改<b>别人</b>的图，改动本身就已经是管理员意志的体现，
+     * 再挂一个待审核等于让自己再审一遍。
+     */
+    @Test
+    void adminUpdateShouldAutoPassAndFillReviewParams() throws Exception {
+        long ownerId = prepareUser("img_t_owner18", "user");
+        prepareUser("img_t_admin18", "admin");
+        Cookie adminCookie = loginAndGetCookie("img_t_admin18");
+        long imageId = preparePassedImage(ownerId, "管理员要改的图", "风景");
+
+        // 先写一条"历史审核意见"，确认自动过审会把它覆盖掉（而不是留着两条矛盾信息）
+        Image history = new Image();
+        history.setId(imageId);
+        history.setReviewMessage("上一轮的历史意见");
+        imageService.updateById(history);
+
+        mockMvc.perform(post("/image/update").cookie(adminCookie)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"id\":\"" + imageId + "\",\"name\":\"管理员改的\"}"))
+                .andExpect(jsonPath("$.code").value(0));
+
+        Image after = imageService.getById(imageId);
+        assertEquals(1, after.getReviewStatus(), "管理员更新图片应自动过审");
+        assertEquals(String.valueOf(ownerId), String.valueOf(after.getReviewerId()),
+                "审核人 = 图片创建人");
+        assertNotNull(after.getReviewTime(), "审核时间 = 当前时间");
+        assertEquals(ImageConstant.AUTO_REVIEW_MESSAGE, after.getReviewMessage(),
+                "审核原因 = 管理员自动过审（固定文案，便于事后区分自动/人工）");
+    }
+
+    /**
+     * 用户更新图片 → 退回待审核，但<b>保留</b>上一轮审核信息。
+     *
+     * <p>只重置状态、不擦参数，是刻意的：图的内容变了，旧结论当然失效；
+     * 但「上次是谁、因为什么拒的」是用户申诉的依据，属于历史事实，不该被清掉。
+     */
+    @Test
+    void userUpdateShouldResetToPendingButKeepReviewHistory() throws Exception {
+        long ownerId = prepareUser("img_t_owner19", "user");
+        Cookie ownerCookie = loginAndGetCookie("img_t_owner19");
+        long imageId = preparePassedImage(ownerId, "用户要改的图", "风景");
+
+        Image history = new Image();
+        history.setId(imageId);
+        history.setReviewMessage("上次的审核意见");
+        history.setReviewerId(123456789L);
+        imageService.updateById(history);
+
+        mockMvc.perform(post("/image/update").cookie(ownerCookie)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"id\":\"" + imageId + "\",\"name\":\"用户改的\"}"))
+                .andExpect(jsonPath("$.code").value(0));
+
+        Image after = imageService.getById(imageId);
+        assertEquals(0, after.getReviewStatus(), "用户编辑图片应退回待审核");
+        assertEquals("上次的审核意见", after.getReviewMessage(), "只重置状态，审核意见保留");
+        assertEquals(123456789L, after.getReviewerId(), "只重置状态，审核人保留");
+    }
+
+    /**
+     * 重复审核的两种姿势：默认「重置全部参数」，显式传 false 则「只改状态、保留历史」。
+     */
+    @Test
+    void reReviewShouldHonorResetSwitch() throws Exception {
+        long ownerId = prepareUser("img_t_owner20", "user");
+        prepareUser("img_t_admin20", "admin");
+        prepareUser("img_t_admin21", "admin");
+        Cookie adminCookie = loginAndGetCookie("img_t_admin20");
+        Cookie anotherAdminCookie = loginAndGetCookie("img_t_admin21");
+        long imageId = prepareImage(ownerId, "被拒的图", "风景");
+
+        // 第一次：拒绝 + 原因（走默认，等价于 resetReviewParams=true）
+        mockMvc.perform(post("/image/review").cookie(adminCookie)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"id\":\"" + imageId + "\",\"reviewStatus\":2,\"reviewMessage\":\"内容不合适\"}"))
+                .andExpect(jsonPath("$.code").value(0));
+        Image first = imageService.getById(imageId);
+        Long firstReviewer = first.getReviewerId();
+        Date firstTime = first.getReviewTime();
+
+        // 第二次：另一个管理员改判通过，但选「不重置审核参数」→ 状态变、历史留
+        mockMvc.perform(post("/image/review").cookie(anotherAdminCookie)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"id\":\"" + imageId + "\",\"reviewStatus\":1,\"resetReviewParams\":false}"))
+                .andExpect(jsonPath("$.code").value(0));
+        Image second = imageService.getById(imageId);
+        assertEquals(1, second.getReviewStatus(), "改判要生效");
+        assertEquals(firstReviewer, second.getReviewerId(), "不重置：审核人保留上一次的");
+        assertEquals(firstTime, second.getReviewTime(), "不重置：审核时间保留上一次的");
+        assertEquals("内容不合适", second.getReviewMessage(), "不重置：意见保留（历史参考）");
+
+        // 第三次：同一个管理员改判拒绝 + 明确重置 → 四字段全部刷新
+        mockMvc.perform(post("/image/review").cookie(adminCookie)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"id\":\"" + imageId + "\",\"reviewStatus\":2,\"reviewMessage\":\"复审还是不行\",\"resetReviewParams\":true}"))
+                .andExpect(jsonPath("$.code").value(0));
+        Image third = imageService.getById(imageId);
+        assertEquals(2, third.getReviewStatus());
+        assertEquals("复审还是不行", third.getReviewMessage(), "重置：意见换成本次的");
+        assertNotEquals(second.getReviewMessage(), third.getReviewMessage());
+    }
+
+    /**
+     * 「不重置参数」时不该逼管理员填原因 —— 那条意见压根不会落库。
+     * 强行必填等于让用户填一个会被丢掉的值，属于假校验。
+     */
+    @Test
+    void rejectWithoutResetShouldNotRequireMessage() throws Exception {
+        long ownerId = prepareUser("img_t_owner22", "user");
+        prepareUser("img_t_admin22", "admin");
+        Cookie adminCookie = loginAndGetCookie("img_t_admin22");
+        long imageId = prepareImage(ownerId, "待审核的图", "风景");
+
+        mockMvc.perform(post("/image/review").cookie(adminCookie)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"id\":\"" + imageId + "\",\"reviewStatus\":2,\"resetReviewParams\":false}"))
+                .andExpect(jsonPath("$.code").value(0));
+
+        Image after = imageService.getById(imageId);
+        assertEquals(2, after.getReviewStatus(), "状态该改还是要改");
+        assertNull(after.getReviewMessage(), "没有历史意见时保持为空，不编造内容");
+    }
+
+    /**
+     * 浏览视角（不传 userId）：只能看见「审核通过」的图 —— 自己的待审核图也不行。
+     *
+     * <p>这是官方流程第 4 条「内容可见性」的落点：<b>主页是已通过图墙</b>，
+     * 「我的图片」才看得到自己的全部状态 —— 两个视角由「传不传自己的 userId」区分。
+     */
+    @Test
+    void browseShouldOnlyReturnPassedImages() throws Exception {
+        long ownerId = prepareUser("img_t_owner23", "user");
+        Cookie cookie = loginAndGetCookie("img_t_owner23");
+        long myPending = prepareImage(ownerId, "我的待审核图", "风景");
+        long myPassed = preparePassedImage(ownerId, "我的已通过图", "风景");
+
+        JsonNode data = listImages(cookie, "{}").path("data");
+        assertFalse(hasRecord(data, myPending), "浏览视角不能出现没通过审核的图（哪怕是自己的）");
+        assertTrue(hasRecord(data, myPassed), "浏览视角要能看见已通过的图");
+    }
+
+    /** 筛选项只来自已通过审核的图 —— 否则等于提前泄露没过审的内容长什么样 */
+    @Test
+    void optionsShouldOnlyExposePassedImagesData() throws Exception {
+        long ownerId = prepareUser("img_t_owner24", "user");
+        Cookie cookie = loginAndGetCookie("img_t_owner24");
+        long passedId = prepareImage(ownerId, "已通过图", "选项分类A",
+                new String[]{"选项标签A"}, ImageConstant.REVIEW_STATUS_PASS);
+        prepareImage(ownerId, "待审核图", "选项分类B", new String[]{"选项标签B"},
+                ImageConstant.REVIEW_STATUS_PENDING);
+
+        MvcResult result = mockMvc.perform(post("/image/options").cookie(cookie))
+                .andExpect(jsonPath("$.code").value(0))
+                .andReturn();
+        JsonNode data = objectMapper.readTree(result.getResponse().getContentAsString(StandardCharsets.UTF_8))
+                .path("data");
+
+        java.util.List<String> categories = new java.util.ArrayList<>();
+        data.path("categories").forEach(n -> categories.add(n.asText()));
+        java.util.List<String> tags = new java.util.ArrayList<>();
+        data.path("tags").forEach(n -> tags.add(n.asText()));
+
+        assertTrue(categories.contains("选项分类A"), "已通过图的分类要出现在筛选项里");
+        assertFalse(categories.contains("选项分类B"), "待审核图的分类不能出现在筛选项里");
+        assertTrue(tags.contains("选项标签A"), "已通过图的标签要出现在筛选项里");
+        assertFalse(tags.contains("选项标签B"), "待审核图的标签不能出现在筛选项里");
+        assertNotNull(imageService.getById(passedId), "造的数据本身要在库里（防造数失败导致的假绿）");
     }
 }
