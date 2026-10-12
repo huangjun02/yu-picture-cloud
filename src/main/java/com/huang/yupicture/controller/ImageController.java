@@ -4,11 +4,14 @@ import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.huang.yupicture.common.BaseResponse;
 import com.huang.yupicture.common.ResultUtils;
 import com.huang.yupicture.model.dto.image.ImageDownloadResult;
+import com.huang.yupicture.model.dto.image.ImageCrawlRequest;
 import com.huang.yupicture.model.dto.image.ImageQueryRequest;
 import com.huang.yupicture.model.dto.image.ImageReviewRequest;
 import com.huang.yupicture.model.dto.image.ImageUpdateRequest;
+import com.huang.yupicture.model.vo.ImageCrawlResultVO;
 import com.huang.yupicture.model.vo.ImageOptionsVO;
 import com.huang.yupicture.model.vo.ImageVO;
+import com.huang.yupicture.service.ImageCrawlService;
 import com.huang.yupicture.service.ImageService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
@@ -56,6 +59,11 @@ public class ImageController {
 
     @Resource
     private ImageService imageService;
+
+
+    @Resource
+
+    private ImageCrawlService imageCrawlService;
 
     /**
      * 上传图片（本人）。
@@ -132,6 +140,17 @@ public class ImageController {
      * 参数走 URL 而不是请求体：与 delete/get 同款 ——
      * 单字段走 URL 参数是本项目的既定约定（fileUrl 可能带特殊字符，前端要 encodeURIComponent）。
      */
+    /**
+     * 批量抓图（管理员）：按关键词从开放许可图库检索并入库。
+     *
+     * <p>同步接口：一次最多 20 张，每张约 1~2 秒（下载 + 压缩 + 缩略图 + 上传 COS），
+     * 十几秒内能返回。再大就该上异步任务了，但那是另一个量级的问题。
+     */
+    @PostMapping("/crawl")
+    public BaseResponse<ImageCrawlResultVO> crawlImages(@RequestBody ImageCrawlRequest request) {
+        return ResultUtils.success(imageCrawlService.crawl(request));
+    }
+
     @PostMapping("/upload/url")
     @Operation(summary = "URL 传图（拉取远端图片，本人）")
     public BaseResponse<ImageVO> uploadImageByUrl(@RequestParam String fileUrl,

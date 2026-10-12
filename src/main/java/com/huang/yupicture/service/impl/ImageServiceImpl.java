@@ -10,6 +10,7 @@ import com.huang.yupicture.common.ErrorCode;
 import com.huang.yupicture.constant.ImageConstant;
 import com.huang.yupicture.constant.UserConstant;
 import com.huang.yupicture.manager.CosManager;
+import com.huang.yupicture.manager.OutboundHttpClient;
 import com.huang.yupicture.mapper.ImageMapper;
 import com.huang.yupicture.model.dto.image.ImageDownloadResult;
 import com.huang.yupicture.model.dto.image.ImageQueryRequest;
@@ -72,6 +73,10 @@ public class ImageServiceImpl extends ServiceImpl<ImageMapper, Image> implements
      */
     @Resource
     private ObjectMapper objectMapper;
+
+    /** 对外 HTTP 抓取（拉远程图片）：走共享客户端，代理/超时/重定向统一在这儿配 */
+    @Resource
+    private OutboundHttpClient outboundHttpClient;
 
     @Override
     public ImageVO getImageById(String id) {
@@ -322,10 +327,9 @@ public class ImageServiceImpl extends ServiceImpl<ImageMapper, Image> implements
         //    工作线程挂住几十秒 —— 几个恶意请求就能耗光线程池。
         byte[] bytes;
         try {
-            java.net.http.HttpClient client = java.net.http.HttpClient.newBuilder()
-                    .connectTimeout(java.time.Duration.ofSeconds(5))
-                    .followRedirects(java.net.http.HttpClient.Redirect.NORMAL)  // 跟 301/302（图床常重定向），但只跟同协议公网（JDK 不跟 https→http 降级）
-                    .build();
+            // 复用共享 HttpClient：超时/重定向/（可选的）代理都收口在 OutboundHttpClient 一处。
+            // 原来在这里 new 一个客户端，"要不要走代理"这个环境事实就得在两处各改一遍 —— 必漏一处
+            java.net.http.HttpClient client = outboundHttpClient.get();
             java.net.http.HttpRequest request = java.net.http.HttpRequest.newBuilder()
                     .uri(uri)
                     .timeout(java.time.Duration.ofSeconds(10))
