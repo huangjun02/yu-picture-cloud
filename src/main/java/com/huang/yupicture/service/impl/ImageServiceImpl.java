@@ -21,6 +21,8 @@ import com.huang.yupicture.model.vo.ImageVO;
 import com.huang.yupicture.service.ImageService;
 import com.huang.yupicture.service.UserService;
 import com.huang.yupicture.utils.ImageUtils;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.huang.yupicture.utils.ParamUtils;
 import com.huang.yupicture.utils.UrlPictureUtils;
 import jakarta.annotation.Resource;
@@ -61,6 +63,15 @@ public class ImageServiceImpl extends ServiceImpl<ImageMapper, Image> implements
      */
     @Autowired(required = false)
     private CosManager cosManager;
+
+    /**
+     * JSON 读写（标签是 JSON 数组字符串，需要序列化 / 反序列化）。
+     *
+     * <p>用注入的共享实例而不是到处 {@code new ObjectMapper()}：ObjectMapper
+     * 是线程安全且带缓存的，每处新建既浪费又绕过了 Spring 的统一配置。
+     */
+    @Resource
+    private ObjectMapper objectMapper;
 
     @Override
     public ImageVO getImageById(String id) {
@@ -158,7 +169,8 @@ public class ImageServiceImpl extends ServiceImpl<ImageMapper, Image> implements
         image.setName(imageUpdateRequest.getName());
         image.setIntroduction(imageUpdateRequest.getIntroduction());
         image.setCategory(imageUpdateRequest.getCategory());
-        image.setTags(imageUpdateRequest.getTags());
+        // 标签落库前规范化：见 normalizeTags 的说明（库里必须只有一个格式）
+        image.setTags(normalizeTags(imageUpdateRequest.getTags()));
 
         // ========== 编辑会「重新触发审核」（官方流程） ==========
         // 图的内容能被改，审核结论就可能过期 —— 所以编辑必须让审核状态重新走一遍：
@@ -561,27 +573,14 @@ public class ImageServiceImpl extends ServiceImpl<ImageMapper, Image> implements
         List<Object> tagRows = this.listObjs(new QueryWrapper<Image>()
                 .select("tags")
                 .eq("reviewStatus", ImageConstant.REVIEW_STATUS_PASS));
-        com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
         java.util.TreeSet<String> tagSet = new java.util.TreeSet<>();
         for (Object row : tagRows) {
             if (row == null) {
                 continue;
             }
-            String json = row.toString().trim();
-            if (json.isEmpty() || "[]".equals(json)) {
-                continue;
-            }
-            try {
-                List<?> parsed = mapper.readValue(json, List.class);
-                for (Object tag : parsed) {
-                    if (tag != null && !tag.toString().trim().isEmpty()) {
-                        tagSet.add(tag.toString().trim());
-                    }
-                }
-            } catch (Exception e) {
-                // 脏数据不该让整个筛选项接口挂掉：跳过这一行，日志留痕
-                log.warn("解析标签 JSON 失败，已跳过：tags={}", json);
-            }
+            // 宽松解析：历史数据里可能有裸字符串（编辑弹窗早期是纯文本框，填什么存什么），
+            // 严格按 JSON 解析会把它们整条丢掉 —— 表现就是"标签填了但筛选栏里没有"
+            tagSet.addAll(parseTagsLenient(row.toString()));
         }
         vo.setTags(new ArrayList<>(tagSet));
         return vo;
@@ -724,6 +723,117 @@ public class ImageServiceImpl extends ServiceImpl<ImageMapper, Image> implements
      * <p>放在 private 方法而不是内联在查询链里：这段逻辑有「解析 + 分流 + 校验」
      * 二十来行，内联会把本来一目了然的查询链搅乱。
      */
+    /**
+     * 把前端传来的标签规范化成**库里唯一的格式**：JSON 数组字符串。
+     *
+     * <p><b>为什么必须规范化（这是实测踩出来的坑）：</b>编辑弹窗原来是个纯文本框，
+     * 用户填「测试」就原样落库成 {@code 测试}（不是 {@code ["测试"]}）。
+     * 后果是下游全乱：筛选项接口按 JSON 解析会失败（标签在主页那条标签栏里直接消失）、
+     * 详情页 {@code JSON.parse} 抛异常（标签不显示）。<b>契约写在注释里、没人守，
+     * 就等于没有契约</b> —— 所以守在这里：Service 是唯一写入口。
+     *
+     * <p>接收三种写法（对用户宽容，对库严格）：
+     * <ul>
+     *   <li>{@code ["风景","城市"]} —— 已经是规范格式，校验后原样用</li>
+     *   <li>{@code 风景,城市} / {@code 风景，城市} —— 逗号（中英文都认）分隔，转成数组</li>
+     *   <li>{@code 风景} —— 单个标签</li>
+     * </ul>
+     *
+     * <p>null 与空串的语义<b>不同</b>：null = 不传 = 不改（靠 MP 的 NOT_NULL 策略跳过），
+     * 空串 = 明确要清空 → 存成 {@code []}。两者混起来做会丢掉"清空标签"这个能力。
+     */
+    private String normalizeTags(String rawTags) {
+        if (rawTags == null) {
+            return null;
+        }
+        String trimmed = rawTags.trim();
+        if (trimmed.isEmpty()) {
+            return "[]";
+        }
+        // 已经是 JSON 数组：校验后原样保留（失败就报错，不静默吞掉用户输入）
+        if (trimmed.startsWith("[")) {
+            List<String> parsed = parseTagsAsJson(trimmed);
+            if (parsed == null) {
+                throw new BusinessException(ErrorCode.PARAMS_ERROR, "标签格式不合法（应为 JSON 数组或逗号分隔）");
+            }
+            return toTagsJson(parsed);
+        }
+        // 逗号分隔 / 单个标签：切分、去空白、去重
+        List<String> tags = new ArrayList<>();
+        for (String part : trimmed.split("[,，]")) {
+            String tag = part.trim();
+            if (!tag.isEmpty() && !tags.contains(tag)) {
+                tags.add(tag);
+            }
+        }
+        return toTagsJson(tags);
+    }
+
+    /** 宽松解析：JSON 数组，或（历史脏数据）裸字符串 / 逗号分隔。解析不出返回空列表 */
+    private List<String> parseTagsLenient(String rawTags) {
+        if (rawTags == null) {
+            return List.of();
+        }
+        String trimmed = rawTags.trim();
+        if (trimmed.isEmpty()) {
+            return List.of();
+        }
+        if (trimmed.startsWith("[")) {
+            List<String> parsed = parseTagsAsJson(trimmed);
+            if (parsed != null) {
+                return parsed;
+            }
+            // JSON 坏了也不丢数据：退化成"整串当一个标签"，至少别让它从筛选项里消失
+            log.warn("标签 JSON 解析失败，按单标签处理：tags={}", trimmed);
+        }
+        List<String> tags = new ArrayList<>();
+        for (String part : trimmed.split("[,，]")) {
+            // 去掉可能残留的 JSON 符号（引号 / 方括号）：处理"半截 JSON"这类脏值。
+            // 用连续 replace 而不是正则字符类 —— 字符类里塞引号要写成 \" 的形式，
+            // 在 Java 字符串里极易写成"字符串提前结束"，编译期报"非法字符"看不出根因
+            String tag = part.trim().replace("[", "").replace("]", "").replace("\"", "").trim();
+            if (!tag.isEmpty() && !tags.contains(tag)) {
+                tags.add(tag);
+            }
+        }
+        return tags;
+    }
+
+    /** 严格解析 JSON 数组：不是数组、元素非字符串、含空标签都返回 null（交给调用方报错） */
+    private List<String> parseTagsAsJson(String json) {
+        try {
+            JsonNode node = objectMapper.readTree(json);
+            if (!node.isArray()) {
+                return null;
+            }
+            List<String> tags = new ArrayList<>();
+            for (JsonNode item : node) {
+                if (!item.isTextual()) {
+                    return null;
+                }
+                String tag = item.asText().trim();
+                if (tag.isEmpty()) {
+                    return null;
+                }
+                if (!tags.contains(tag)) {
+                    tags.add(tag);
+                }
+            }
+            return tags;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private String toTagsJson(List<String> tags) {
+        try {
+            return objectMapper.writeValueAsString(tags);
+        } catch (Exception e) {
+            // 序列化 List<String> 不会失败；真失败说明环境有问题，不该静默写脏数据
+            throw new BusinessException(ErrorCode.SYSTEM_ERROR, "标签保存失败");
+        }
+    }
+
     private void applyTagsFilter(LambdaQueryWrapper<Image> wrapper, String tags) {
         if (ParamUtils.isBlank(tags)) {
             return;
@@ -733,10 +843,9 @@ public class ImageServiceImpl extends ServiceImpl<ImageMapper, Image> implements
             // 多选：解析成 JSON 数组，每个标签独立 like，全部命中才算
             List<String> tagList;
             try {
-                // Jackson 已在 classpath（Spring Boot 自带），直接用
-                com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
-                tagList = mapper.readValue(trimmed,
-                        mapper.getTypeFactory().constructCollectionType(List.class, String.class));
+                // 用注入的共享 ObjectMapper（线程安全、带缓存），别每处 new 一个
+                tagList = objectMapper.readValue(trimmed,
+                        objectMapper.getTypeFactory().constructCollectionType(List.class, String.class));
             } catch (Exception e) {
                 // 数组解析失败：是"看起来像 JSON 其实不是"的垃圾输入 → 报参数错误，
                 // 而不是静默降级成模糊查（用户以为是多选，结果按整串模糊，行为不可预期）

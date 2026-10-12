@@ -771,4 +771,80 @@ class ImageControllerTest {
         assertFalse(tags.contains("选项标签B"), "待审核图的标签不能出现在筛选项里");
         assertNotNull(imageService.getById(passedId), "造的数据本身要在库里（防造数失败导致的假绿）");
     }
+
+    // ==================== 五、标签格式规范化（写入口守契约） ====================
+
+    /**
+     * 标签落库一律规范成 JSON 数组字符串。
+     *
+     * <p>起因是真实数据里的脏值：编辑弹窗早期是纯文本框，用户填「测试」就原样落库成
+     * {@code 测试}，后端解析不了 → 它在主页标签栏里直接消失（分类栏里倒是有它，
+     * 因为分类不走 JSON）。契约写在注释里没人守等于没有契约，所以守在此处。
+     */
+    @Test
+    void updateImageShouldNormalizeTagsToJsonArray() throws Exception {
+        long ownerId = prepareUser("img_t_owner25", "user");
+        Cookie cookie = loginAndGetCookie("img_t_owner25");
+        long imageId = prepareImage(ownerId, "标签规范化", "风景");
+
+        // ① 逗号分隔（中英文逗号都认）+ 去重 → JSON 数组
+        mockMvc.perform(post("/image/update").cookie(cookie)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"id\":\"" + imageId + "\",\"tags\":\"测试,风景，测试\"}"))
+                .andExpect(jsonPath("$.code").value(0));
+        assertEquals("[\"测试\",\"风景\"]", imageService.getById(imageId).getTags(),
+                "逗号分隔要转成 JSON 数组，且去重");
+
+        // ② 已是规范格式：校验后原样保留
+        mockMvc.perform(post("/image/update").cookie(cookie)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"id\":\"" + imageId + "\",\"tags\":\"[\\\"热门\\\"]\"}"))
+                .andExpect(jsonPath("$.code").value(0));
+        assertEquals("[\"热门\"]", imageService.getById(imageId).getTags());
+
+        // ③ 空串 = 明确清空（与「null = 不改」区分开，否则会丢掉清空能力）
+        mockMvc.perform(post("/image/update").cookie(cookie)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"id\":\"" + imageId + "\",\"tags\":\"\"}"))
+                .andExpect(jsonPath("$.code").value(0));
+        assertEquals("[]", imageService.getById(imageId).getTags(), "空串要落成空数组");
+
+        // ④ 看起来像数组其实不是 → 40000，且数据没被动（不能静默吞掉用户输入）
+        mockMvc.perform(post("/image/update").cookie(cookie)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"id\":\"" + imageId + "\",\"tags\":\"[测试\"}"))
+                .andExpect(jsonPath("$.code").value(40000));
+        assertEquals("[]", imageService.getById(imageId).getTags(), "报错时数据必须保持原样");
+    }
+
+    /** 筛选项要能读出历史脏数据（裸字符串标签），否则「填了但筛选栏里没有」 */
+    @Test
+    void optionsShouldReadLegacyBareStringTags() throws Exception {
+        long ownerId = prepareUser("img_t_owner26", "user");
+        Cookie cookie = loginAndGetCookie("img_t_owner26");
+
+        // 直接塞一个"历史脏值"：裸字符串（不走 update，模拟老数据）
+        Image legacy = new Image();
+        legacy.setUrl("https://test-bucket.cos.ap-shanghai.myqcloud.com/test/legacy.jpg");
+        legacy.setName("脏数据图");
+        legacy.setCategory("脏数据分类");
+        legacy.setTags("脏标签");
+        legacy.setUserId(ownerId);
+        legacy.setReviewStatus(ImageConstant.REVIEW_STATUS_PASS);
+        imageService.save(legacy);
+
+        MvcResult result = mockMvc.perform(post("/image/options").cookie(cookie))
+                .andExpect(jsonPath("$.code").value(0))
+                .andReturn();
+        JsonNode data = objectMapper.readTree(result.getResponse().getContentAsString(StandardCharsets.UTF_8))
+                .path("data");
+
+        java.util.List<String> tags = new java.util.ArrayList<>();
+        data.path("tags").forEach(n -> tags.add(n.asText()));
+        java.util.List<String> categories = new java.util.ArrayList<>();
+        data.path("categories").forEach(n -> categories.add(n.asText()));
+
+        assertTrue(tags.contains("脏标签"), "裸字符串标签要能被读出来（宽松解析），不能整条丢掉");
+        assertTrue(categories.contains("脏数据分类"));
+    }
 }
