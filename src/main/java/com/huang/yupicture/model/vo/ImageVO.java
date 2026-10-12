@@ -26,6 +26,18 @@ public class ImageVO implements Serializable {
     /** 图片 id —— String，理由见类注释第 1 条 */
     private String id;
 
+    /**
+     * 审核状态：0-待审核，1-通过，2-拒绝。
+     *
+     * <p>先过后审（requirements 拍板）：图照常可看可用，审核是事后管理。
+     * 进 VO 是给管理员工作台看的 —— 审核状态不算敏感字段，列出来利大于弊
+     * （普通用户看到"待审核"还能知道自己的图为什么被管理员找上门）。
+     */
+    private Integer reviewStatus;
+
+    /** 审核意见（拒绝时后端必填；管理员工作台展示用） */
+    private String reviewMessage;
+
     /** 图片访问地址（COS 公网 URL，前端直接丢给 img 标签） */
     private String url;
 

@@ -25,6 +25,10 @@ CREATE TABLE IF NOT EXISTS `image`
     picHeight    INT           NULL COMMENT '高度（px）',
     picScale     DOUBLE        NULL COMMENT '宽高比（宽 / 高），列表页按比例预留位置、防抖动',
     picFormat    VARCHAR(32)   NULL COMMENT '格式：jpg / png / webp ...',
+    reviewStatus  TINYINT      NOT NULL DEFAULT 0 COMMENT '审核状态：0-待审核，1-通过，2-拒绝',
+    reviewMessage VARCHAR(512)  NULL COMMENT '审核意见（拒绝时必填原因）',
+    reviewerId    BIGINT       NULL COMMENT '审核人 id（管理员）',
+    reviewTime    DATETIME      NULL COMMENT '审核时间',
     userId       BIGINT        NOT NULL COMMENT '上传用户 id（归属校验的依据）',
     createTime   DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
     updateTime   DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
@@ -35,6 +39,8 @@ CREATE TABLE IF NOT EXISTS `image`
     -- 按名称搜索、按分类筛选
     KEY idx_name (name),
     KEY idx_category (category),
+    -- 管理员待审核列表按状态筛（WHERE reviewStatus = 0 AND isDelete = 0）
+    KEY idx_reviewStatus (reviewStatus),
     -- 列表默认按时间倒序
     KEY idx_createTime (createTime)
 ) ENGINE = InnoDB

@@ -76,6 +76,20 @@ public class Image implements Serializable {
     /** 格式：jpg / png / webp ... */
     private String picFormat;
 
+    // ==================== 审核流（先过后审，requirements 已拍板） ====================
+
+    /** 审核状态：0-待审核，1-通过，2-拒绝 */
+    private Integer reviewStatus;
+
+    /** 审核意见（拒绝时必填原因 —— 没有理由的拒绝比拒绝本身更伤人） */
+    private String reviewMessage;
+
+    /** 审核人 id（管理员） */
+    private Long reviewerId;
+
+    /** 审核时间 */
+    private Date reviewTime;
+
     /** 上传用户 id（归属校验的依据） */
     private Long userId;
 
