@@ -89,11 +89,38 @@ public class CosManager {
      * <p>原图走随机 UUID key（见 {@link #buildKey}），缩略图走推导 key（紧跟原图）——
      * 两条路共用这里，落对象、记日志、异常翻译只写一遍。
      */
+    /**
+     * 决定进 SDK 的 Content-Type：调用方给的可信值优先，否则按后缀兜底。
+     *
+     * <p>为什么以「后缀」兜底而不是以「远端响应头」为准：远端说自己是什么不算数
+     * （上传链路本身就不信文件名/声明，一切以魔数校验过的后缀为准），
+     * 用后端认定过的后缀推导才不会出现「内容 jpg、头写 png」这种自相矛盾的对象。
+     */
+    private static String contentTypeOf(String contentType, String suffix) {
+        if (contentType != null && !contentType.isBlank()) {
+            return contentType;
+        }
+        return switch (suffix == null ? "" : suffix.toLowerCase(java.util.Locale.ROOT)) {
+            case "jpg", "jpeg" -> "image/jpeg";
+            case "png" -> "image/png";
+            case "webp" -> "image/webp";
+            // 未知后缀：给通用二进制类型，至少保证不是 null
+            default -> "application/octet-stream";
+        };
+    }
+
     private String upload(byte[] bytes, String suffix, String contentType, String key) {
         ObjectMetadata metadata = new ObjectMetadata();
         metadata.setContentLength(bytes.length);
-        // 存对 Content-Type，浏览器访问时才知道怎么渲染（否则可能被当成下载）
-        metadata.setContentType(contentType);
+        // 存对 Content-Type，浏览器访问时才知道怎么渲染（否则可能被当成下载）。
+        // ⚠️ 绝不能把 null 交给 SDK：ObjectMetadata.setContentType(null) 不会报错，
+        // 但 COS SDK 内部拼 header 时会对这个 null 值调 toString()，抛出
+        // `NullPointerException: Cannot invoke "Object.toString()" because the return
+        // value of "Map$Entry.getValue()" is null` —— 堆栈指向 SDK 内部，
+        // 完全看不出是「自己传了个 null」。URL 传图（远端响应头不可信、拿不到
+        // 浏览器给的 MIME）就是这样踩到的，所以兜底放在这一层：调用方可以传 null，
+        // 但进 SDK 的值必须是确定的。
+        metadata.setContentType(contentTypeOf(contentType, suffix));
 
         try (InputStream inputStream = new ByteArrayInputStream(bytes)) {
             PutObjectRequest request = new PutObjectRequest(
@@ -125,9 +152,9 @@ public class CosManager {
      */
     public String uploadThumbnail(byte[] thumbnailBytes, String originalKey) {
         String thumbKey = buildThumbnailKey(originalKey);
-        // 缩略图保持原图格式（png 缩略图还是 png），Content-Type 按后缀给
-        String contentType = thumbKey.endsWith(".png") ? "image/png" : "image/jpeg";
-        return upload(thumbnailBytes, suffixOf(thumbKey), contentType, thumbKey);
+        // 缩略图保持原图格式（png 缩略图还是 png）：后缀 → MIME 的映射只存在一份，
+        // 传 null 让下面统一兜底，避免「两处各写一套对应关系」慢慢漂移
+        return upload(thumbnailBytes, suffixOf(thumbKey), null, thumbKey);
     }
 
     /**

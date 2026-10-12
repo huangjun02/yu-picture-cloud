@@ -96,4 +96,37 @@ class CosManagerTest {
             }
         }
     }
+
+    /**
+     * 回归：contentType 传 null 也必须能上传成功。
+     *
+     * <p>URL 传图就是这条路径 —— 远端响应头不可信、也没有浏览器给的 MIME，
+     * 只能传 null 让 CosManager 按魔数校验过的后缀推导。曾经的 bug：
+     * null 直接进 {@code ObjectMetadata.setContentType()}，COS SDK 内部对 null 值
+     * 调 toString() 抛 NPE，前端只看到「图片上传失败」，日志里也只是一句 SDK 的 NPE。
+     */
+    @Test
+    void uploadWithNullContentTypeShouldStillWork() throws Exception {
+        Assumptions.assumeTrue(cosManager != null,
+                "未配置 cos.client.access-key，跳过 COS 连通性测试（配好 application-local.yml 后自动生效）");
+
+        BufferedImage image = new BufferedImage(1, 1, BufferedImage.TYPE_INT_RGB);
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        ImageIO.write(image, "png", baos);
+        byte[] pngBytes = baos.toByteArray();
+
+        String key = cosManager.upload(pngBytes, "png", null);
+        assertNotNull(key, "contentType 为 null 时也必须有对象键返回");
+        try {
+            // 拉一次确认对象真的在，且 Content-Type 被兜底成了 image/png（不是空）
+            HttpResponse<byte[]> response = HttpClient.newHttpClient().send(
+                    HttpRequest.newBuilder(URI.create(cosManager.buildUrl(key))).GET().build(),
+                    HttpResponse.BodyHandlers.ofByteArray());
+            assertEquals(200, response.statusCode(), "上传后的对象应能公网访问");
+            assertEquals("image/png", response.headers().firstValue("Content-Type").orElse(""),
+                    "null contentType 必须按后缀兜底成 image/png，不能留空");
+        } finally {
+            cosManager.delete(key);
+        }
+    }
 }
