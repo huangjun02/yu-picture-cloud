@@ -10,6 +10,8 @@ import com.huang.yupicture.model.vo.ImageOptionsVO;
 import com.huang.yupicture.model.vo.ImageVO;
 import org.springframework.web.multipart.MultipartFile;
 
+import java.util.List;
+
 /**
  * 图片业务接口。
  *
@@ -155,6 +157,24 @@ public interface ImageService extends IService<Image> {
      * @return 脱敏 VO，入参 null 时返回 null
      */
     ImageVO toImageVO(Image image);
+
+    /**
+     * 以图搜图：上传一张图，返回图库里与它最相似的图（按相似度从高到低）。
+     *
+     * <p><b>搜索范围 = 主页图墙语义</b>：只搜「已通过」的图，所有登录用户看到的是同一批数据。
+     * 选这个口径的理由：以图搜图的入口在主页（浏览场景），而且图库量级下「找出图库里的
+     * 相似图」才是有意义的用法。范围钉死在服务端、不接受入参控制 ——
+     * 接口的入参一旦能决定「能看谁的数据」，越权就从这里长出来（同 applyUserScope 的立场）。
+     *
+     * <p>相似度用感知哈希的汉明距离衡量（见 {@code ImageUtils.perceptualHash}）：
+     * 距离 ≤ {@code ImageConstant.SIMILAR_MAX_DISTANCE} 才算相似，最多返回
+     * {@code SIMILAR_MAX_RESULT} 张。没有相似图时返回空列表（不是报错）。
+     *
+     * @param file 查询图（走与上传同一套校验：非空 / 大小 / 后缀白名单 / 魔数）
+     * @return 相似的图片列表（最像的在前）；无匹配时为空列表
+     * @throws com.huang.yupicture.common.BusinessException 未登录（40100）／不是合法图片（40000）
+     */
+    List<ImageVO> searchSimilarImage(MultipartFile file);
 
     /**
      * 主页筛选项：当前可见范围内出现过的分类与标签（去重）。

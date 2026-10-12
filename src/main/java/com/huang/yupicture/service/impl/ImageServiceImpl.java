@@ -36,9 +36,11 @@ import org.springframework.web.multipart.MultipartFile;
 import java.io.IOException;
 import java.security.SecureRandom;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.Date;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Objects;
 import java.util.stream.Collectors;
 
@@ -594,6 +596,16 @@ public class ImageServiceImpl extends ServiceImpl<ImageMapper, Image> implements
         } else {
             log.warn("主色提取失败，该图不参与颜色筛选：name={}", imageName);
         }
+        // ========== 感知哈希（以图搜图的检索维度） ==========
+        // 与主色 / 缩略图 / WebP 同一条纪律：算不出就 null 降级，绝不阻断上传。
+        // 放在这里（而不是两个上传入口里各写一遍）的理由与压缩 / 主色一致 ——
+        // 这是「上传处理链的汇合点」，文件上传与 URL 传图必须走同一条路。
+        String picHash = ImageUtils.perceptualHash(bytes);
+        if (picHash != null) {
+            image.setPicHash(picHash);
+        } else {
+            log.warn("感知哈希计算失败，该图不参与以图搜图：name={}", imageName);
+        }
         image.setUserId(loginUser.getId());
         // ========== 审核状态的初始值：按「谁传的」分流（官方流程） ==========
         // 管理员传的图不存在「管理员审自己」这一环，直接过审并补齐审核参数；
@@ -650,6 +662,63 @@ public class ImageServiceImpl extends ServiceImpl<ImageMapper, Image> implements
         int dotIndex = originalFilename.lastIndexOf('.');
         // dotIndex > 0：跳过"纯扩展名"（如 ".jpg"）和没有点的情况，避免切出空串
         return dotIndex > 0 ? originalFilename.substring(0, dotIndex) : originalFilename;
+    }
+
+    /**
+     * 以图搜图。
+     *
+     * <p><b>为什么范围不用 {@code applyUserScope}</b>：那个方法服务的是「我的图片 / 主页浏览」
+     * 两种视角（靠入参 userId 分流）。以图搜图只有一个场景（主页找相似图），
+     * 语义越少越不容易出错 —— 而且它不接受任何「决定能看谁的数据」的入参，
+     * 从接口形状上就没有越权面。
+     */
+    @Override
+    public List<ImageVO> searchSimilarImage(MultipartFile file) {
+        userService.getLoginUser();   // 未登录 → 40100（与其它接口一致）
+
+        // ① 与上传完全同一套校验：非空 / 大小 / 后缀白名单 + 魔数。
+        //    搜索图也是用户传进来的文件，不能因为"只是搜一下"就放松（放进来一段脚本同样是攻击面）
+        String suffix = ImageUtils.checkAndGetSuffix(file);
+        byte[] bytes;
+        try {
+            bytes = file.getBytes();
+        } catch (IOException e) {
+            log.error("读取搜索图片失败", e);
+            throw new BusinessException(ErrorCode.SYSTEM_ERROR, "图片读取失败，请重试");
+        }
+        ImageUtils.checkContent(bytes, suffix);
+
+        // ② 算查询图的哈希。⚠️ 这里与上传链路的降级语义不同：上传算不出可以存 null 跳过，
+        //    搜索算不出就「没有可比对的东西」了，必须明确报错 —— 返回空列表会被用户
+        //    理解成「图库里没有相似的图」，那是错误的信息（失败要响亮，不能伪装成"没有结果"）
+        String targetHash = ImageUtils.perceptualHash(bytes);
+        if (targetHash == null) {
+            throw new BusinessException(ErrorCode.PARAMS_ERROR, "无法解析这张图片，请换一张试试");
+        }
+
+        // ③ 捞候选：只取「已通过 + 有哈希」的图。
+        //    汉明距离是逐位比较，SQL 表达不了、也走不了索引 —— 只能拉回内存算。
+        //    个人项目量级（几千张）毫无压力；SIMILAR_SCAN_LIMIT 是自己给自己上的保险丝。
+        LambdaQueryWrapper<Image> wrapper = new LambdaQueryWrapper<>();
+        wrapper.eq(Image::getReviewStatus, ImageConstant.REVIEW_STATUS_PASS)
+                .isNotNull(Image::getPicHash)
+                .orderByDesc(Image::getId)
+                .last("LIMIT " + ImageConstant.SIMILAR_SCAN_LIMIT);
+        List<Image> candidates = this.list(wrapper);
+
+        // ④ 算距离 → 过滤 → 排序 → 截断。用 Map.Entry 当 (图片, 距离) 的载体，
+        //    免去为此新建一个只在方法内用一次的 record（YAGNI）
+        List<Image> hits = candidates.stream()
+                .map(image -> Map.entry(image,
+                        ImageUtils.hammingDistance(targetHash, image.getPicHash())))
+                .filter(entry -> entry.getValue() <= ImageConstant.SIMILAR_MAX_DISTANCE)
+                .sorted(Comparator.comparingInt(Map.Entry::getValue))
+                .limit(ImageConstant.SIMILAR_MAX_RESULT)
+                .map(Map.Entry::getKey)
+                .toList();
+
+        log.info("以图搜图：候选={}, 命中={}, 查询图哈希={}", candidates.size(), hits.size(), targetHash);
+        return hits.stream().map(this::toImageVO).toList();
     }
 
     @Override

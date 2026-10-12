@@ -91,6 +91,18 @@ public class Image implements Serializable {
      */
     private String picColorFamily;
 
+    /**
+     * 感知哈希（pHash，64 位 → 16 位十六进制，小写；提取失败为 {@code null}）。
+     *
+     * <p>以图搜图的检索键。上传 / URL 传图时由 {@code ImageUtils.perceptualHash} 计算。
+     * {@code null} = 这张图不参与以图搜图（老图未回填、或解码失败），不是数据缺失。
+     *
+     * <p>为什么它必须落库（「可推导信息不落库」的又一处例外）：哈希是<b>像素的统计量</b>，
+     * 不是 URL 的函数 —— 要现算就得把图从 COS 拉回来解码，一次搜索拉上千张图。
+     * 与 picColor 同一条理由。
+     */
+    private String picHash;
+
     /** 格式：jpg / png / webp ... */
     private String picFormat;
 

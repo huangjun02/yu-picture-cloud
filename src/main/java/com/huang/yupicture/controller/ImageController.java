@@ -22,6 +22,7 @@ import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -181,6 +182,20 @@ public class ImageController {
     @Operation(summary = "主页筛选项：分类与标签候选（登录用户）")
     public BaseResponse<ImageOptionsVO> listOptions() {
         return ResultUtils.success(imageService.listOptions());
+    }
+
+    /**
+     * 以图搜图（登录用户）：上传一张图，返回图库里最相似的图（按相似度从高到低，最多 20 张）。
+     *
+     * <p>请求类型是 {@code multipart/form-data}，只有一个字段 {@code file} ——
+     * 与上传接口同款。不走请求体 JSON：图片本体天然是二进制，multipart 是它的标准载体。
+     *
+     * <p>搜索范围钉死在服务端（已通过图），不接受任何「查谁的」入参。
+     */
+    @PostMapping("/search/similar")
+    @Operation(summary = "以图搜图（登录用户）")
+    public BaseResponse<List<ImageVO>> searchSimilarImage(@RequestPart("file") MultipartFile file) {
+        return ResultUtils.success(imageService.searchSimilarImage(file));
     }
 
     /**
