@@ -60,11 +60,11 @@ public class ImageQueryRequest extends PageRequest {
     private String picFormat;
 
     /**
-     * 主色调（精确匹配：{@code #RRGGBB}，大小写不敏感 —— 入库统一大写，
-     * 查询侧归一化后比对，前端传小写也能命中）。
+     * 主色调筛选（传色板标准色，如 {@code #FFFFFF}）。
      *
-     * <p>取值来自前端色板的预设色，不是自由文本输入；不合法的值（非 #RRGGBB 格式）
-     * 报 40000，不静默忽略 —— 用户明确选了颜色却搜出全部图，等于筛选失效还不报错。
+     * <p>服务端把它归类成色系（{@code classifyColorFamily}）后按 {@code picColorFamily}
+     * 等值匹配 —— 主色是连续值（#FDF9FB 也是"白"），精确匹配色值永远对不上，
+     * 按色系匹配才符合"点白色筛出所有白图"的预期。大小写不敏感；非法格式报 40000。
      */
     private String picColor;
 

@@ -82,6 +82,15 @@ public class Image implements Serializable {
      */
     private String picColor;
 
+    /**
+     * 色系（white/black/red/orange/yellow/green/cyan/blue/purple/brown）。
+     *
+     * <p>由 {@code picColor} 经 {@code ImageUtils.classifyColorFamily} 归类，筛选按它匹配：
+     * 主色是连续值（#FDF9FB「近似白」），色板是离散标准色（#FFFFFF），精确匹配永远对不上——
+     * 色系是把连续值收敛到离散类别的桥梁。picColor 为 NULL 时同为 NULL。
+     */
+    private String picColorFamily;
+
     /** 格式：jpg / png / webp ... */
     private String picFormat;
 

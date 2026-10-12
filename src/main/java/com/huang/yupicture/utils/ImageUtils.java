@@ -195,9 +195,97 @@ public final class ImageUtils {
         }
     }
 
-    /** 保留 RGB 一个通道的高 3 位（0~7），低 5 位归零 —— 颜色量化的基本操作 */
+    /** 保留 RGB 一个通道的高 3 位（0~7，共 8 桶）—— 颜色量化的基本操作。
+     *  ⚠️ 是右移 5 位（丢低 5 位），不是右移 3 位——右移 3 位保留的是高 5 位（32 桶），
+     *  桶太细会让直方图退化成「几乎每像素一桶」。实现时注释与代码必须对上。 */
     private static int quantize(int channel) {
-        return channel >> COLOR_QUANTIZE_BITS;
+        return channel >> (8 - COLOR_QUANTIZE_BITS);
+    }
+
+    /**
+     * 把 #RRGGBB 归类到离散色系（与前端色板一一对应，见前端 constants/colors.ts）。
+     *
+     * <p><b>为什么需要色系：</b>主色提取产出的是连续空间里的具体色值
+     * （如 #FDF9FB「近似白」、#338CFD「亮蓝」），而筛选入口是离散色板
+     * （#FFFFFF、#1677FF…）。精确匹配两个空间几乎永远对不上——用户点「白色」
+     * 却筛不出任何「近似白」的图，等于功能不可用。色系是把连续值收敛到
+     * 离散类别的唯一桥梁。
+     *
+     * <p>规则（HSV 色相 + 明度/饱和度双重判定）：
+     * ① V ≥ 0.92 且 S ≤ 0.12 → white；② V ≤ 0.16 → black；
+     * ③ S ≤ 0.25 且 0.16 < V < 0.92 → 按亮度二分 gray 区间归 white/black
+     * （低饱和度没有色相可言，硬算色相会被噪声牵着走）；
+     * ④ 其余按色相角分档：红 <15 或 ≥345，橙 15~45，黄 45~70，绿 70~160，
+     * 青 160~200，蓝 200~260，紫 260~300，≥300 且 <345 → 棕/紫边界按亮度分
+     * （暗色偏红棕归棕，其余归紫）。
+     *
+     * @param hexColor {@code #RRGGBB}（大小写均可）
+     * @return 色系名（小写英文，与色板 value 对应）；格式不合法返回 {@code null}
+     */
+    public static String classifyColorFamily(String hexColor) {
+        if (hexColor == null) {
+            return null;
+        }
+        String trimmed = hexColor.trim();
+        if (!trimmed.matches("^#[0-9A-Fa-f]{6}$")) {
+            return null;
+        }
+        int r = Integer.parseInt(trimmed.substring(1, 3), 16);
+        int g = Integer.parseInt(trimmed.substring(3, 5), 16);
+        int b = Integer.parseInt(trimmed.substring(5, 7), 16);
+
+        int max = Math.max(r, Math.max(g, b));
+        int min = Math.min(r, Math.min(g, b));
+        double v = max / 255.0;
+        double s = max == 0 ? 0 : (double) (max - min) / max;
+
+        if (v >= 0.92 && s <= 0.12) {
+            return "white";
+        }
+        if (v <= 0.16) {
+            return "black";
+        }
+        if (s <= 0.25) {
+            return v >= 0.5 ? "white" : "black";
+        }
+
+        // 色相角（0~360）：标准 HSV 公式，max 是谁决定落在哪个扇区
+        double delta = max - min;
+        double hue;
+        if (max == r) {
+            hue = 60 * (((g - b) / delta) % 6);
+        } else if (max == g) {
+            hue = 60 * ((b - r) / delta + 2);
+        } else {
+            hue = 60 * ((r - g) / delta + 4);
+        }
+        if (hue < 0) {
+            hue += 360;
+        }
+
+        if (hue < 15 || hue >= 345) {
+            return v < 0.4 ? "brown" : "red";
+        }
+        if (hue < 45) {
+            return v < 0.45 ? "brown" : "orange";
+        }
+        if (hue < 70) {
+            return "yellow";
+        }
+        if (hue < 160) {
+            return "green";
+        }
+        if (hue < 200) {
+            return "cyan";
+        }
+        if (hue < 260) {
+            return "blue";
+        }
+        if (hue < 300) {
+            return "purple";
+        }
+        // 300~345：亮的是紫，暗的偏红棕
+        return v < 0.4 ? "brown" : "purple";
     }
 
     /**

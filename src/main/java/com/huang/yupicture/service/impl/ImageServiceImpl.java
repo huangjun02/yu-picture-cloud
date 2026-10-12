@@ -128,10 +128,10 @@ public class ImageServiceImpl extends ServiceImpl<ImageMapper, Image> implements
         if (!ParamUtils.isBlank(imageQueryRequest.getPicFormat())) {
             wrapper.eq(Image::getPicFormat, imageQueryRequest.getPicFormat());
         }
-        // 主色调筛选（精确匹配）。格式不合法报 40000 而不是静默忽略：
-        // 用户明确选了颜色却搜出全部图，等于筛选失效还不报错（与标签数组的处理同一立场）
+        // 主色调筛选：入参是色板标准色 → 归类成色系 → 按 picColorFamily 等值匹配
+        // （分流收在 applyColorFilter，与 applyTagsFilter 同一写法）
         if (!ParamUtils.isBlank(imageQueryRequest.getPicColor())) {
-            wrapper.eq(Image::getPicColor, normalizeColor(imageQueryRequest.getPicColor()));
+            applyColorFilter(wrapper, imageQueryRequest.getPicColor());
         }
 
         // 审核状态筛选（本人 / 管理员都可用：管理员看整个待办队列，本人看自己哪张被拒了）
@@ -502,6 +502,10 @@ public class ImageServiceImpl extends ServiceImpl<ImageMapper, Image> implements
         String mainColor = ImageUtils.extractMainColor(bytes);
         if (mainColor != null) {
             image.setPicColor(mainColor);
+            // 色系（筛选入口）跟着主色一起写：主色是连续值（#FDF9FB），色板是离散标准色
+            // （#FFFFFF），筛选必须按色系等值匹配才对得上「点白色筛出所有白图」的预期。
+            // 两者在同一个代码路径里一次算出，不存在「先写了主色、忘了写色系」的窗口。
+            image.setPicColorFamily(ImageUtils.classifyColorFamily(mainColor));
         } else {
             log.warn("主色提取失败，该图不参与颜色筛选：name={}", imageName);
         }
@@ -855,19 +859,22 @@ public class ImageServiceImpl extends ServiceImpl<ImageMapper, Image> implements
     }
 
     /**
-     * 颜色值归一化：去空白、统一大写、校验 {@code #RRGGBB} 格式。
+     * 颜色筛选：入参是色板标准色，归类成色系后按 {@code picColorFamily} 等值匹配。
      *
-     * <p>入库时 {@code extractMainColor} 固定产出大写，查询侧把前端传来的小写
-     * 归一化后再比对（比在 SQL 里用 LOWER 更省 —— 走得动 idx_picColor 索引）。
-     * 格式不对报 40000：色板给的标准色不可能不合法，能传出不合法值说明是
-     * 拼出来的请求，静默忽略等于筛选悄悄失效。
+     * <p><b>为什么不直接比色值：</b>主色是连续空间里的具体值（#FDF9FB「近似白」），
+     * 色板是离散标准色（#FFFFFF）——等值比较两个空间几乎永远对不上，用户点「白色」
+     * 一张都筛不出来。色系是把连续值收敛到离散类别的桥：每张图恰好属于一个色系，
+     * 点任何色块都有确定结果（不会出现「点了却什么都没有」）。
+     *
+     * <p>格式不对报 40000 而不是静默忽略：用户明确选了颜色却搜出全部图，
+     * 等于筛选失效还不报错（与标签数组的处理同一立场）。
      */
-    private String normalizeColor(String picColor) {
-        String trimmed = picColor.trim().toUpperCase(Locale.ROOT);
-        if (!trimmed.matches("^#[0-9A-F]{6}$")) {
+    private void applyColorFilter(LambdaQueryWrapper<Image> wrapper, String picColor) {
+        String family = ImageUtils.classifyColorFamily(picColor);
+        if (family == null) {
             throw new BusinessException(ErrorCode.PARAMS_ERROR, "颜色格式不正确，应为 #RRGGBB");
         }
-        return trimmed;
+        wrapper.eq(Image::getPicColorFamily, family);
     }
 
     private void applyTagsFilter(LambdaQueryWrapper<Image> wrapper, String tags) {

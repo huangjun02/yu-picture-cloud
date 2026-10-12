@@ -89,4 +89,66 @@ class ImageUtilsColorTest {
         // 不是图片的字节：解码失败返回 null（降级，不炸上传链路），不抛异常
         assertNull(ImageUtils.extractMainColor("not an image".getBytes()));
     }
+
+    // ==================== 色系归类（筛选入口） ====================
+
+    @Test
+    void classifyShouldMapBasicColorsToTheirFamily() {
+        assertEquals("white", ImageUtils.classifyColorFamily("#FFFFFF"));
+        assertEquals("black", ImageUtils.classifyColorFamily("#000000"));
+        assertEquals("red", ImageUtils.classifyColorFamily("#E74C3C"));
+        assertEquals("orange", ImageUtils.classifyColorFamily("#E67E22"));
+        assertEquals("yellow", ImageUtils.classifyColorFamily("#F1C40F"));
+        assertEquals("green", ImageUtils.classifyColorFamily("#2ECC71"));
+        assertEquals("cyan", ImageUtils.classifyColorFamily("#1ABC9C"));
+        assertEquals("blue", ImageUtils.classifyColorFamily("#1677FF"));
+        assertEquals("purple", ImageUtils.classifyColorFamily("#9B59B6"));
+        assertEquals("brown", ImageUtils.classifyColorFamily("#5C3317"));
+    }
+
+    @Test
+    void classifyShouldAbsorbNearbyValuesIntoTheSameFamily() {
+        // 这是本功能最初崩掉的地方：提取器产出的是连续空间里的具体值，
+        // 而筛选入口是离散色板 —— 「近似白」「近似蓝」必须和标准色归到同一色系
+        assertEquals("white", ImageUtils.classifyColorFamily("#FDF9FB"), "近似白要归白");
+        assertEquals("white", ImageUtils.classifyColorFamily("#FCFFFC"));
+        assertEquals("blue", ImageUtils.classifyColorFamily("#338CFD"), "近似蓝要归蓝");
+        assertEquals("black", ImageUtils.classifyColorFamily("#1A1A1A"));
+    }
+
+    @Test
+    void classifyShouldBeCaseInsensitive() {
+        assertEquals(ImageUtils.classifyColorFamily("#E74C3C"), ImageUtils.classifyColorFamily("#e74c3c"));
+    }
+
+    @Test
+    void classifyShouldReturnNullForInvalidInput() {
+        assertNull(ImageUtils.classifyColorFamily(null));
+        assertNull(ImageUtils.classifyColorFamily(""));
+        assertNull(ImageUtils.classifyColorFamily("red"));
+        assertNull(ImageUtils.classifyColorFamily("#12345"));
+        assertNull(ImageUtils.classifyColorFamily("#GGGGGG"));
+    }
+
+    /**
+     * 色板不变式：**每个色板色必须归类回它自己代表的那个色系**。
+     *
+     * <p>色板在前端（{@code constants/colors.ts}），归类算法在后端，两边靠「色值 → 色系」
+     * 这条函数关系对齐。踩过的坑：色板里的棕色 {@code #8B4513} 亮度 0.545、色相 25°，
+     * 按规则归成了 orange —— 点「棕色」发出这个色值，后端却去查橙色图，功能静默错位。
+     * 这条用例把「色板取值本身必须归类正确」钉住，改色板时它会先红。
+     */
+    @Test
+    void everyPaletteColorShouldClassifyBackToItsOwnFamily() {
+        String[][] palette = {
+                {"#000000", "black"}, {"#FFFFFF", "white"}, {"#E74C3C", "red"},
+                {"#E67E22", "orange"}, {"#F1C40F", "yellow"}, {"#2ECC71", "green"},
+                {"#1ABC9C", "cyan"}, {"#1677FF", "blue"}, {"#9B59B6", "purple"},
+                {"#5C3317", "brown"},
+        };
+        for (String[] pair : palette) {
+            assertEquals(pair[1], ImageUtils.classifyColorFamily(pair[0]),
+                    "色板色 " + pair[0] + " 应归类为 " + pair[1] + "（与前端 colors.ts 保持一致）");
+        }
+    }
 }

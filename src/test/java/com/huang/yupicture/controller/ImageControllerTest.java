@@ -7,6 +7,7 @@ import com.huang.yupicture.model.entity.Image;
 import com.huang.yupicture.model.entity.User;
 import com.huang.yupicture.service.ImageService;
 import com.huang.yupicture.service.UserService;
+import com.huang.yupicture.utils.ImageUtils;
 import com.huang.yupicture.utils.PasswordUtils;
 import jakarta.annotation.Resource;
 import jakarta.servlet.http.Cookie;
@@ -133,9 +134,15 @@ class ImageControllerTest {
         return prepareImage(userId, name, category, tags, reviewStatus, null);
     }
 
-    /** 带主色的重载（颜色筛选用例用） */
+    /** 带主色的重载（颜色筛选用例用）：色系跟着主色一起写，与生产代码同一路径 */
     private long prepareImage(long userId, String name, String category, String[] tags,
                               int reviewStatus, String picColor) {
+        return prepareImage(userId, name, category, tags, reviewStatus, picColor, null);
+    }
+
+    /** 显式指定色系的重载（测「色系按主色归类」这条不变式时用不到，留作查错口子） */
+    private long prepareImage(long userId, String name, String category, String[] tags,
+                              int reviewStatus, String picColor, String picColorFamily) {
         Image image = new Image();
         image.setUrl("https://test-bucket.cos.ap-shanghai.myqcloud.com/test/" + name + ".jpg");
         image.setName(name);
@@ -153,6 +160,10 @@ class ImageControllerTest {
         image.setPicHeight(600);
         image.setPicScale(800.0 / 600.0);
         image.setPicColor(picColor);
+        // 生产代码里色系是「提取主色后立刻归类」，测试造数据照抄这条链 —— 只 set picColor
+        // 不 set 色系的话，筛选（按色系匹配）永远查不到，会误判成功能坏了
+        image.setPicColorFamily(picColorFamily != null ? picColorFamily
+                : ImageUtils.classifyColorFamily(picColor));
         image.setPicFormat("jpg");
         image.setUserId(userId);
         image.setReviewStatus(reviewStatus);
@@ -858,32 +869,36 @@ class ImageControllerTest {
     // ==================== 六、按颜色搜索 ====================
 
     @Test
-    void filterByPicColorShouldReturnExactMatch() throws Exception {
+    void colorFilterShouldMatchSameFamilyNotExactColorValue() throws Exception {
         long ownerId = prepareUser("img_t_color1", "user");
         Cookie cookie = loginAndGetCookie("img_t_color1");
         // 差值法（同口径）：基数和增量都必须带同一个筛选条件 ——
         // 无条件总数包含库里全部已通过图，跟「按色筛出几张」不是同一口径，比出来必是负数
-        long base = totalOf(cookie, "{\"picColor\":\"#E74C3C\"}");
-        prepareImage(ownerId, "红图", "素材", new String[]{"测试"}, ImageConstant.REVIEW_STATUS_PASS, "#E74C3C");
-        prepareImage(ownerId, "蓝图", "素材", new String[]{"测试"}, ImageConstant.REVIEW_STATUS_PASS, "#1677FF");
+        long whiteBase = totalOf(cookie, "{\"picColor\":\"#FFFFFF\"}");
+        long blueBase = totalOf(cookie, "{\"picColor\":\"#1677FF\"}");
 
-        long red = totalOf(cookie, "{\"picColor\":\"#E74C3C\"}") - base;
-        assertEquals(1, red, "按主色精确匹配应恰好命中刚造的红图，实际增量：" + red);
-        // 蓝图不该被红色条件命中；不存在的颜色结果必须为 0（造的红图独占 #E74C3C）
-        assertEquals(0, totalOf(cookie, "{\"picColor\":\"#00BFFF\"}"),
-                "不存在的颜色筛选结果必须为 0");
+        // 关键回归：提取器产出的是「近似白」#FDF9FB（真实相册里大量这种值），
+        // 用户点色板标准色 #FFFFFF —— 精确比色值会一张都筛不出（这正是本功能最初的致命 bug），
+        // 按色系匹配才对得上「点白色筛出所有白图」的预期
+        prepareImage(ownerId, "近白图", "素材", new String[]{"测试"}, ImageConstant.REVIEW_STATUS_PASS, "#FDF9FB");
+        prepareImage(ownerId, "近蓝图", "素材", new String[]{"测试"}, ImageConstant.REVIEW_STATUS_PASS, "#338CFD");
+
+        assertEquals(1, totalOf(cookie, "{\"picColor\":\"#FFFFFF\"}") - whiteBase,
+                "点「白色」必须筛出主色是近似白的图（连续值→色系收敛）");
+        assertEquals(1, totalOf(cookie, "{\"picColor\":\"#1677FF\"}") - blueBase,
+                "点「蓝色」必须筛出主色是近似蓝的图");
     }
 
     @Test
-    void filterByPicColorShouldBeCaseInsensitive() throws Exception {
+    void colorFilterShouldBeCaseInsensitive() throws Exception {
         long ownerId = prepareUser("img_t_color2", "user");
         Cookie cookie = loginAndGetCookie("img_t_color2");
         prepareImage(ownerId, "绿图", "素材", new String[]{"测试"}, ImageConstant.REVIEW_STATUS_PASS, "#2ECC71");
 
-        // 入库统一大写；查询传小写要走归一化，两个大小写必须命中同一批
+        // 前端色板可能传小写（#2ecc71），归类结果必须与大写一致
         assertEquals(totalOf(cookie, "{\"picColor\":\"#2ECC71\"}"),
                 totalOf(cookie, "{\"picColor\":\"#2ecc71\"}"),
-                "颜色筛选必须大小写不敏感（前端色板可能传小写）");
+                "颜色筛选必须大小写不敏感");
     }
 
     @Test
@@ -904,20 +919,19 @@ class ImageControllerTest {
 
     @Test
     void colorFilterRespectsVisibility() throws Exception {
-        // 可见性与颜色筛选是两个正交的维度：别人的待审核图即使颜色命中也不可见
+        // 可见性与颜色筛选是两个正交的维度：别人的待审核图即使色系命中也不可见
         long ownerId = prepareUser("img_t_color4a", "user");
         long otherId = prepareUser("img_t_color4b", "user");
+        Cookie cookie = loginAndGetCookie("img_t_color4a");
+
+        long redBase = totalOf(cookie, "{\"picColor\":\"#E74C3C\"}");
         prepareImage(otherId, "别人的红色待审图", "素材", new String[]{"测试"},
                 ImageConstant.REVIEW_STATUS_PENDING, "#E74C3C");
-        Cookie cookie = loginAndGetCookie("img_t_color4a");
-        // ownerId 一张红色已通过的都没有 → 按红色查到的必须全是「已通过」语义下的空
-        // （普通用户浏览视角只见已通过；这里没造自己的红图，断言 0 才说明待审核的没漏进来）
-        mockMvc.perform(post("/image/list/page").cookie(cookie)
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content("{\"picColor\":\"#E74C3C\"}"))
-                .andExpect(jsonPath("$.code").value(0))
-                .andExpect(jsonPath("$.data.total").value(0));
-        // 管理员能看见（管理员默认查全部）
+
+        // 浏览视角（普通用户默认）只见已通过 —— 别人那张待审核的红图不该被算进来
+        assertEquals(redBase, totalOf(cookie, "{\"picColor\":\"#E74C3C\"}"),
+                "别人待审核的图不该出现在颜色筛选结果里");
+        // 管理员默认查全部，能看到它
         long adminId = prepareUser("img_t_color4admin", "admin");
         Cookie adminCookie = loginAndGetCookie("img_t_color4admin");
         assertTrue(totalOf(adminCookie, "{\"picColor\":\"#E74C3C\"}") >= 1,
