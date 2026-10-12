@@ -35,7 +35,19 @@ public class ImageQueryRequest extends PageRequest {
     /** 分类（精确匹配） */
     private String category;
 
-    /** 标签（模糊匹配 JSON 字符串） */
+    /**
+     * 标签筛选。两种传法：
+     * <ul>
+     *   <li><b>单标签</b>：直接传标签文字（如 {@code 风景}），模糊匹配</li>
+     *   <li><b>多选（AND 语义）</b>：传 JSON 数组字符串（如 {@code ["风景","城市"]}），
+     *       每个标签单独 like，必须全部命中 —— 图库场景里用户勾了两个标签，
+     *       预期就是"同时带这两个标签"的图</li>
+     * </ul>
+     *
+     * <p>判断依据：以 {@code [} 开头且能解析成 JSON 数组 → 按多选处理，否则按单标签模糊查。
+     * 多选的每个标签都要单独校验非空 —— {@code ["", "风景"]} 里的空串会生成
+     * {@code like '""'} 把结果集搅乱。
+     */
     private String tags;
 
     /**

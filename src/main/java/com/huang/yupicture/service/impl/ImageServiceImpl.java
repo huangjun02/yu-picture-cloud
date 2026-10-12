@@ -99,9 +99,7 @@ public class ImageServiceImpl extends ServiceImpl<ImageMapper, Image> implements
         if (!ParamUtils.isBlank(imageQueryRequest.getCategory())) {
             wrapper.eq(Image::getCategory, imageQueryRequest.getCategory());
         }
-        if (!ParamUtils.isBlank(imageQueryRequest.getTags())) {
-            wrapper.like(Image::getTags, imageQueryRequest.getTags());
-        }
+        applyTagsFilter(wrapper, imageQueryRequest.getTags());
         if (!ParamUtils.isBlank(imageQueryRequest.getPicFormat())) {
             wrapper.eq(Image::getPicFormat, imageQueryRequest.getPicFormat());
         }
@@ -383,6 +381,49 @@ public class ImageServiceImpl extends ServiceImpl<ImageMapper, Image> implements
     }
 
     // ==================== 权限相关（本模块的重点） ====================
+
+    /**
+     * 标签筛选的落点：单标签模糊查，JSON 数组则逐个 like（AND 语义）。
+     *
+     * <p>为什么用 {@code like '%"标签"%'}（带引号）而不是裸 {@code like '%标签%'}：
+     * tags 存的是 JSON 数组字符串 {@code ["风景","城市"]}。查 {@code 景} 时裸匹配
+     * 能命中，但查 {@code 城市} 时，一张标签为 {@code ["城市地标"]} 的图也会被
+     * 「子串误命中」—— 加上 JSON 的引号定界后，匹配的是完整的
+     * {@code "城市"} 元素，误报率大幅下降。仍是模糊方案（够用、零依赖），
+     * 要完全精准得上 MySQL JSON 函数，将来有需要再升级。
+     *
+     * <p>放在 private 方法而不是内联在查询链里：这段逻辑有「解析 + 分流 + 校验」
+     * 二十来行，内联会把本来一目了然的查询链搅乱。
+     */
+    private void applyTagsFilter(LambdaQueryWrapper<Image> wrapper, String tags) {
+        if (ParamUtils.isBlank(tags)) {
+            return;
+        }
+        String trimmed = tags.trim();
+        if (trimmed.startsWith("[")) {
+            // 多选：解析成 JSON 数组，每个标签独立 like，全部命中才算
+            List<String> tagList;
+            try {
+                // Jackson 已在 classpath（Spring Boot 自带），直接用
+                com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+                tagList = mapper.readValue(trimmed,
+                        mapper.getTypeFactory().constructCollectionType(List.class, String.class));
+            } catch (Exception e) {
+                // 数组解析失败：是"看起来像 JSON 其实不是"的垃圾输入 → 报参数错误，
+                // 而不是静默降级成模糊查（用户以为是多选，结果按整串模糊，行为不可预期）
+                throw new BusinessException(ErrorCode.PARAMS_ERROR, "标签格式不正确");
+            }
+            for (String tag : tagList) {
+                if (ParamUtils.isBlank(tag)) {
+                    throw new BusinessException(ErrorCode.PARAMS_ERROR, "标签不能为空");
+                }
+                wrapper.like(Image::getTags, "\"" + tag.trim() + "\"");
+            }
+        } else {
+            // 单标签：保持原有模糊匹配语义
+            wrapper.like(Image::getTags, trimmed);
+        }
+    }
 
     /**
      * 归属校验：这张图是不是当前登录用户的？管理员豁免。

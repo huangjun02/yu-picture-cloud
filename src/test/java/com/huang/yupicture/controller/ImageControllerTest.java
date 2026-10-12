@@ -111,12 +111,23 @@ class ImageControllerTest {
 
     /** 直接往库里塞一张图（不走上传接口 —— 上传要连 COS，测试不该依赖外部服务），返回图片 id */
     private long prepareImage(long userId, String name, String category) {
+        return prepareImage(userId, name, category, new String[]{"测试"});
+    }
+
+    /** 带 tags 的重载（标签筛选用例用）：tags 存 JSON 数组字符串 */
+    private long prepareImage(long userId, String name, String category, String[] tags) {
         Image image = new Image();
         image.setUrl("https://test-bucket.cos.ap-shanghai.myqcloud.com/test/" + name + ".jpg");
         image.setName(name);
         image.setIntroduction("测试用图");
         image.setCategory(category);
-        image.setTags("[\"测试\"]");
+        StringBuilder json = new StringBuilder("[");
+        for (int i = 0; i < tags.length; i++) {
+            if (i > 0) json.append(",");
+            json.append("\"").append(tags[i]).append("\"");
+        }
+        json.append("]");
+        image.setTags(json.toString());
         image.setPicSize(2048L);
         image.setPicWidth(800);
         image.setPicHeight(600);
@@ -320,6 +331,44 @@ class ImageControllerTest {
             assertEquals(String.valueOf(ownerId), record.path("userId").asText());
         }
         return data.path("records").size();
+    }
+
+    @Test
+    void listImageByPageShouldFilterByTagMultiSelectAnd() throws Exception {
+        long ownerId = prepareUser("img_t_owner11", "user");
+        Cookie cookie = loginAndGetCookie("img_t_owner11");
+        prepareImage(ownerId, "黄山云海", "风景", new String[]{"风景", "山"});
+        prepareImage(ownerId, "西湖日落", "风景", new String[]{"风景"});
+        prepareImage(ownerId, "红烧肉", "美食", new String[]{"美食", "硬菜"});
+
+        // ① 单标签：两两张「风景」都该出来（含黄山和西湖）
+        JsonNode bySingle = listImages(cookie, "{\"tags\":\"风景\"}").path("data");
+        assertEquals(2, bySingle.path("records").size(), "单标签模糊匹配应命中两张风景图");
+
+        // ② 多选 AND：["风景","山"] 只该命中黄山（西湖没"山"标签）
+        JsonNode byMulti = listImages(cookie, "{\"tags\":\"[\\\"风景\\\",\\\"山\\\"]\"}").path("data");
+        assertEquals(1, byMulti.path("records").size(), "多选 AND 应只命中同时带两个标签的图");
+        assertEquals("黄山云海", byMulti.path("records").get(0).path("name").asText());
+
+        // ③ 带引号定界的子串误报防线：查「山」不应带出「硬菜」（都不是对方子串，
+        //    但查「菜」若裸匹配会命中「硬菜」——这里验证引号定界下单标签也精确）
+        JsonNode byDish = listImages(cookie, "{\"tags\":\"菜\"}").path("data");
+        assertEquals(1, byDish.path("records").size());
+        assertEquals("红烧肉", byDish.path("records").get(0).path("name").asText());
+
+        // ④ 多选里混入空标签：明确拒绝而不是静默降级
+        mockMvc.perform(post("/image/list/page")
+                        .cookie(cookie)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"tags\":\"[\\\"\\\",\\\"风景\\\"]\"}"))
+                .andExpect(jsonPath("$.code").value(40000));
+
+        // ⑤ 形似 JSON 但解析失败的垃圾：同样 40000
+        mockMvc.perform(post("/image/list/page")
+                        .cookie(cookie)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"tags\":\"[风景\"}"))
+                .andExpect(jsonPath("$.code").value(40000));
     }
 
     @Test
