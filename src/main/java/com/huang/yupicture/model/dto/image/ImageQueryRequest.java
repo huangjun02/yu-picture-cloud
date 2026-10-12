@@ -58,4 +58,13 @@ public class ImageQueryRequest extends PageRequest {
 
     /** 格式（精确匹配：jpg / png / webp） */
     private String picFormat;
+
+    /**
+     * 审核状态（精确匹配：0-待审核，1-通过，2-拒绝）。
+     *
+     * <p>给管理员的审核工作台用 —— 没有这个筛选，前端只能拿当前页数据自己过一遍，
+     * 结果就是「第 1 页显示 3 条待审核，第 2 页又冒出 5 条」，跟真实待办数对不上。
+     * 翻页语义必须由数据库这层保证。
+     */
+    private Integer reviewStatus;
 }

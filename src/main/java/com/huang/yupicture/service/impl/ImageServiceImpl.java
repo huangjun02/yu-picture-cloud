@@ -107,6 +107,11 @@ public class ImageServiceImpl extends ServiceImpl<ImageMapper, Image> implements
             wrapper.eq(Image::getPicFormat, imageQueryRequest.getPicFormat());
         }
 
+        // 审核状态筛选（本人 / 管理员都可用：管理员看整个待办队列，本人看自己哪张被拒了）
+        if (imageQueryRequest.getReviewStatus() != null) {
+            wrapper.eq(Image::getReviewStatus, imageQueryRequest.getReviewStatus());
+        }
+
         // ③ 排序：时间倒序 + id 兜底
         //    createTime 只精确到秒（DDL 是 DATETIME 无小数位），同一秒上传的多张图之间
         //    顺序不确定 —— 翻页时会重复或漏项。加 id 做第二排序键，让顺序唯一确定。
