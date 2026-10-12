@@ -25,6 +25,8 @@ CREATE TABLE IF NOT EXISTS `image`
     picHeight    INT           NULL COMMENT '高度（px）',
     picScale     DOUBLE        NULL COMMENT '宽高比（宽 / 高），列表页按比例预留位置、防抖动',
     picFormat    VARCHAR(32)   NULL COMMENT '格式：jpg / png / webp ...',
+    -- 与 sql/07 / 08 / 10 三条迁移同步（picColor 主色、picColorFamily 色系、picHash 感知哈希）
+    picHash      CHAR(16)      NULL COMMENT '感知哈希（64 位十六进制，小写；以图搜图用）',
     reviewStatus  TINYINT      NOT NULL DEFAULT 0 COMMENT '审核状态：0-待审核，1-通过，2-拒绝',
     reviewMessage VARCHAR(512)  NULL COMMENT '审核意见（拒绝时必填原因）',
     reviewerId    BIGINT       NULL COMMENT '审核人 id（管理员）',
