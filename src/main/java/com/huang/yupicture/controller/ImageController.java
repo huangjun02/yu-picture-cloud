@@ -3,6 +3,7 @@ package com.huang.yupicture.controller;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.huang.yupicture.common.BaseResponse;
 import com.huang.yupicture.common.ResultUtils;
+import com.huang.yupicture.model.dto.image.ImageDownloadResult;
 import com.huang.yupicture.model.dto.image.ImageQueryRequest;
 import com.huang.yupicture.model.dto.image.ImageUpdateRequest;
 import com.huang.yupicture.model.vo.ImageVO;
@@ -10,6 +11,12 @@ import com.huang.yupicture.service.ImageService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.annotation.Resource;
+import org.springframework.http.ContentDisposition;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
+
+import java.nio.charset.StandardCharsets;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -89,6 +96,31 @@ public class ImageController {
     @Operation(summary = "分页查询图片（普通用户只返回自己的）")
     public BaseResponse<Page<ImageVO>> listImageByPage(@RequestBody ImageQueryRequest imageQueryRequest) {
         return ResultUtils.success(imageService.listImageByPage(imageQueryRequest));
+    }
+
+    /**
+     * 下载图片文件（本人或管理员）。
+     *
+     * <p><b>统一响应的唯一例外</b>：不走 {@code BaseResponse} JSON 包装，直接回二进制 ——
+     * 图片塞进 JSON 会被 base64 化，白白多 33% 体积还多一次前端解码。下载语义就是
+     * 「给我文件本身」，HTTP 原生就是干这个的。
+     *
+     * <p>权限与查询一致（能看就能下载），校验在 Service。文件名经
+     * {@code ContentDisposition} 正确编码 —— 中文名直接塞 header 会乱码。
+     */
+    @PostMapping("/download")
+    @Operation(summary = "下载图片文件（本人或管理员）")
+    public ResponseEntity<byte[]> downloadImage(@RequestParam String id) {
+        ImageDownloadResult result = imageService.downloadImage(id);
+        // filename* 按 RFC 5987 编码中文；ascii 兜底给不支持 filename* 的老客户端
+        ContentDisposition disposition = ContentDisposition.attachment()
+                .filename(result.getFileName(), StandardCharsets.UTF_8)
+                .build();
+        return ResponseEntity.ok()
+                .contentType(MediaType.parseMediaType(result.getContentType()))
+                .header(HttpHeaders.CONTENT_DISPOSITION, disposition.toString())
+                .contentLength(result.getBytes().length)
+                .body(result.getBytes());
     }
 
     /**

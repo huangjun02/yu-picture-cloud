@@ -452,4 +452,38 @@ class ImageControllerTest {
         assertEquals(before - 1, after, "逻辑删除后列表总数要减 1（不能被查出来）");
         assertNotEquals(before, after);
     }
+
+    /**
+     * 下载接口的纯逻辑用例（不连 COS —— 依赖外部服务的能力不进测试）：
+     * <ul>
+     *   <li>别人的图 → 40101（下载是"读"，权限与查询一致）</li>
+     *   <li>不存在的 id → 40400</li>
+     *   <li>格式错的 id → 40000</li>
+     * </ul>
+     * 正常下载走的是真 COS（byte[] 回传），MockMvc 环境下 cosManager 为 null，
+     * 会停在"对象存储未配置"——那一步的行为已由 CosManagerTest 覆盖，这里不重复。
+     */
+    @Test
+    void downloadImageShouldCheckOwnerAndParams() throws Exception {
+        long ownerId = prepareUser("img_t_owner15", "user");
+        Cookie ownerCookie = loginAndGetCookie("img_t_owner15");
+        long imageId = prepareImage(ownerId, "别人的图", "风景");
+
+        // ① 其他人下载 → 40101 无权（先有图，第二个用户来下）
+        prepareUser("img_t_other15", "user");
+        Cookie otherCookie = loginAndGetCookie("img_t_other15");
+        mockMvc.perform(post("/image/download").cookie(otherCookie).param("id", String.valueOf(imageId)))
+                .andExpect(jsonPath("$.code").value(40101));
+
+        // ② 本人下载：权限过了，但 MockMvc 环境没有 COS 配置 → SYSTEM_ERROR（50000）
+        //    这一步证明的是"权限校验已通过、走到了存储层"——如果权限没过，报的会是 40101
+        mockMvc.perform(post("/image/download").cookie(ownerCookie).param("id", String.valueOf(imageId)))
+                .andExpect(jsonPath("$.code").value(50000));
+
+        // ③ 不存在 / 格式错
+        mockMvc.perform(post("/image/download").cookie(ownerCookie).param("id", "999999999999999999"))
+                .andExpect(jsonPath("$.code").value(40400));
+        mockMvc.perform(post("/image/download").cookie(ownerCookie).param("id", "abc"))
+                .andExpect(jsonPath("$.code").value(40000));
+    }
 }

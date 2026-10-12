@@ -8,6 +8,7 @@ import com.huang.yupicture.common.ErrorCode;
 import com.huang.yupicture.constant.UserConstant;
 import com.huang.yupicture.manager.CosManager;
 import com.huang.yupicture.mapper.ImageMapper;
+import com.huang.yupicture.model.dto.image.ImageDownloadResult;
 import com.huang.yupicture.model.dto.image.ImageQueryRequest;
 import com.huang.yupicture.model.dto.image.ImageUpdateRequest;
 import com.huang.yupicture.model.entity.Image;
@@ -381,6 +382,36 @@ public class ImageServiceImpl extends ServiceImpl<ImageMapper, Image> implements
     }
 
     // ==================== 权限相关（本模块的重点） ====================
+
+    @Override
+    public ImageDownloadResult downloadImage(String id) {
+        User loginUser = userService.getLoginUser();
+        Image image = this.getById(ParamUtils.parseId(id));
+        if (image == null) {
+            throw new BusinessException(ErrorCode.NOT_FOUND_ERROR, "图片不存在");
+        }
+        // 与查询同一套归属校验：能看就能下载
+        checkImageOwner(image, loginUser);
+
+        if (cosManager == null) {
+            throw new BusinessException(ErrorCode.SYSTEM_ERROR, "对象存储未配置，无法下载");
+        }
+        String key = cosManager.getKeyFromUrl(image.getUrl());
+        byte[] bytes = cosManager.download(key);
+
+        // 保存文件名：图片名称 + 真实后缀。名称里的路径分隔符要清掉
+        // （用户把图命名为 "a/b.jpg" 时，浏览器的"另存为"会被带进子目录）
+        String safeName = image.getName().replaceAll("[\\\\/:*?\"<>|]", "_");
+        String fileName = safeName + "." + image.getPicFormat();
+
+        // Content-Type：按存的格式映射（picFormat 是上传时魔数校验过的白名单值，不会跑偏）
+        String contentType = switch (image.getPicFormat()) {
+            case "png" -> "image/png";
+            case "webp" -> "image/webp";
+            default -> "image/jpeg";
+        };
+        return new ImageDownloadResult(bytes, fileName, contentType);
+    }
 
     /**
      * 标签筛选的落点：单标签模糊查，JSON 数组则逐个 like（AND 语义）。

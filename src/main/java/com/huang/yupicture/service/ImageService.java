@@ -2,6 +2,7 @@ package com.huang.yupicture.service;
 
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.baomidou.mybatisplus.spring.service.IService;
+import com.huang.yupicture.model.dto.image.ImageDownloadResult;
 import com.huang.yupicture.model.dto.image.ImageQueryRequest;
 import com.huang.yupicture.model.dto.image.ImageUpdateRequest;
 import com.huang.yupicture.model.entity.Image;
@@ -30,6 +31,17 @@ public interface ImageService extends IService<Image> {
      * @throws com.huang.yupicture.common.BusinessException 未登录（40100）／图片不存在（40000）／无权查看他人的图（40101）
      */
     ImageVO getImageById(String id);
+
+    /**
+     * 下载图片文件（本人或管理员）。
+     *
+     * <p>与查询接口同一套归属校验 —— 「能看就能下载」，反之「看不了也下不了」：
+     * 下载本质上是一次"读"，权限模型与 getImageById 完全一致，不另设规则。
+     *
+     * @param id 图片 id（字符串形式的雪花 id）
+     * @return 文件字节 + 建议的保存文件名 + Content-Type（Controller 拼响应头用）
+     */
+    ImageDownloadResult downloadImage(String id);
 
     /**
      * 分页查询图片。

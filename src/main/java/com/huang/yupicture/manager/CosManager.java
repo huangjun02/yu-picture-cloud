@@ -13,6 +13,7 @@ import org.springframework.stereotype.Component;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.util.Locale;
@@ -259,6 +260,33 @@ public class CosManager {
             throw new BusinessException(ErrorCode.SYSTEM_ERROR, "图片地址格式不正确，无法定位存储文件");
         }
         return url.substring(index + ".myqcloud.com/".length());
+    }
+
+    /**
+     * 下载对象内容。
+     *
+     * <p><b>为什么需要这个方法（图明明是公有读的）：</b>浏览器里「打开 URL」是预览，
+     * <b>{@code <a download>} 对跨域链接无效</b>（COS 域名 ≠ 站点域名，浏览器会忽略
+     * download 属性直接内联显示）。要触发「保存到磁盘」，响应必须从同源带
+     * {@code Content-Disposition: attachment} 回来 —— 所以需要后端读 COS 转发一遍。
+     *
+     * <p>单图 ≤ 5MB（上传侧的上限），整读进内存没有压力，与 compress / thumbnail
+     * 的内存风格一致。
+     *
+     * @param key 对象键
+     * @return 文件字节
+     */
+    public byte[] download(String key) {
+        try (InputStream in = cosClient.getObject(cosClientConfig.getBucket(), key).getObjectContent();
+             ByteArrayOutputStream out = new ByteArrayOutputStream()) {
+            in.transferTo(out);
+            return out.toByteArray();
+        } catch (Exception e) {
+            // 与 upload/delete 同一处置：细节进日志（可能是 key 不存在 / 无权限 / 网络断），
+            // 对前端只说"下载失败"，不透 COS 内部信息
+            log.error("从 COS 下载文件失败：key={}", key, e);
+            throw new BusinessException(ErrorCode.SYSTEM_ERROR, "图片下载失败");
+        }
     }
 
     /**
