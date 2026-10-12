@@ -18,6 +18,14 @@ public final class ImageConstant {
     /** 审核状态：拒绝 */
     public static final int REVIEW_STATUS_REJECT = 2;
 
+    /**
+     * 管理员自动过审时写入的审核意见。
+     *
+     * <p>写成固定文案而不是留空：留空会让「管理员传的图」和「老数据没填意见」
+     * 在库里长得一样，事后分不清这张图到底是自动过的还是人工过的。
+     */
+    public static final String AUTO_REVIEW_MESSAGE = "管理员自动过审";
+
     private ImageConstant() {
     }
 }

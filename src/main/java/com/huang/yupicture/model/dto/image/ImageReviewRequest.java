@@ -23,4 +23,17 @@ public class ImageReviewRequest implements Serializable {
 
     /** 审核意见（拒绝时必填；通过时可不填） */
     private String reviewMessage;
+
+    /**
+     * 是否重置全部审核参数（审核人 / 审核时间 / 审核意见）。
+     *
+     * <p>重复审核才用得上这个开关：
+     * <ul>
+     *   <li>{@code true}（默认，兼容不传的老客户端）：本次审核人 / 时间 / 意见全部覆盖</li>
+     *   <li>{@code false}：只改审核状态，上一次的审核人 / 时间 / 意见保留下来当历史参考</li>
+     * </ul>
+     * 用 Boolean 而不是 boolean：null 和 false 要区分开 —— null 按「重置」处理，
+     * 否则老客户端（不传这个字段）会静默变成「不重置」，行为随版本漂移。
+     */
+    private Boolean resetReviewParams;
 }

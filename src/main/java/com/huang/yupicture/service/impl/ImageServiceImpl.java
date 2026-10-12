@@ -1,6 +1,8 @@
 package com.huang.yupicture.service.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
+import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.baomidou.mybatisplus.spring.service.impl.ServiceImpl;
 import com.huang.yupicture.common.BusinessException;
@@ -14,6 +16,7 @@ import com.huang.yupicture.model.dto.image.ImageQueryRequest;
 import com.huang.yupicture.model.dto.image.ImageUpdateRequest;
 import com.huang.yupicture.model.entity.Image;
 import com.huang.yupicture.model.entity.User;
+import com.huang.yupicture.model.vo.ImageOptionsVO;
 import com.huang.yupicture.model.vo.ImageVO;
 import com.huang.yupicture.service.ImageService;
 import com.huang.yupicture.service.UserService;
@@ -28,7 +31,9 @@ import org.springframework.web.multipart.MultipartFile;
 
 import java.io.IOException;
 import java.util.Date;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 import java.util.stream.Collectors;
 
 /**
@@ -69,7 +74,7 @@ public class ImageServiceImpl extends ServiceImpl<ImageMapper, Image> implements
             // 收官时统一（改 user 会动到已通过的测试断言，所以没顺手改）。
             throw new BusinessException(ErrorCode.NOT_FOUND_ERROR, "图片不存在");
         }
-        checkImageOwner(image, loginUser);
+        checkImageVisible(image, loginUser);
         return toImageVO(image);
     }
 
@@ -155,11 +160,26 @@ public class ImageServiceImpl extends ServiceImpl<ImageMapper, Image> implements
         image.setCategory(imageUpdateRequest.getCategory());
         image.setTags(imageUpdateRequest.getTags());
 
+        // ========== 编辑会「重新触发审核」（官方流程） ==========
+        // 图的内容能被改，审核结论就可能过期 —— 所以编辑必须让审核状态重新走一遍：
+        //  - 普通用户改：退回待审核。**只重置状态，旧审核参数留在库里当历史**
+        //    （「上次谁因为什么拒了我」是用户申辩的依据，不该被抹掉）
+        //  - 管理员改：自动过审并补齐参数（审核人=创建人、时间=当前、原因=管理员自动过审）
+        if (isAdmin(loginUser)) {
+            image.setReviewStatus(ImageConstant.REVIEW_STATUS_PASS);
+            image.setReviewerId(oldImage.getUserId());
+            image.setReviewTime(new Date());
+            image.setReviewMessage(ImageConstant.AUTO_REVIEW_MESSAGE);
+        } else {
+            image.setReviewStatus(ImageConstant.REVIEW_STATUS_PENDING);
+        }
+
         boolean result = this.updateById(image);
         if (!result) {
             throw new BusinessException(ErrorCode.OPERATION_ERROR, "更新失败");
         }
-        log.info("编辑图片：id={}, 操作人id={}", imageId, loginUser.getId());
+        log.info("编辑图片：id={}, 操作人id={}, 审核状态重置为={}", imageId, loginUser.getId(),
+                isAdmin(loginUser) ? "自动过审" : "待审核");
         return true;
     }
 
@@ -455,9 +475,17 @@ public class ImageServiceImpl extends ServiceImpl<ImageMapper, Image> implements
             image.setPicScale((double) size[0] / size[1]);
         }
         image.setUserId(loginUser.getId());
-        // 先过后审：任何入口传上来的图都从"待审核"开始（requirements 拍板：
-        // 审核是事后管理不是准入门槛 —— 图照常可看可用，管理员有空再审）
-        image.setReviewStatus(ImageConstant.REVIEW_STATUS_PENDING);
+        // ========== 审核状态的初始值：按「谁传的」分流（官方流程） ==========
+        // 管理员传的图不存在「管理员审自己」这一环，直接过审并补齐审核参数；
+        // 普通用户传的图进待审核队列。审核是事后管理不是准入门槛（requirements 拍板）。
+        if (isAdmin(loginUser)) {
+            image.setReviewStatus(ImageConstant.REVIEW_STATUS_PASS);
+            image.setReviewerId(loginUser.getId());          // 审核人 = 创建人
+            image.setReviewTime(new Date());
+            image.setReviewMessage(ImageConstant.AUTO_REVIEW_MESSAGE);
+        } else {
+            image.setReviewStatus(ImageConstant.REVIEW_STATUS_PENDING);
+        }
 
         boolean result = this.save(image);
         if (!result) {
@@ -505,6 +533,60 @@ public class ImageServiceImpl extends ServiceImpl<ImageMapper, Image> implements
     }
 
     @Override
+    public ImageOptionsVO listOptions() {
+        // 登录校验：筛选项是"浏览"的辅助，浏览本身要登录（与列表接口保持一致）
+        userService.getLoginUser();
+
+        ImageOptionsVO vo = new ImageOptionsVO();
+
+        // 分类：交给数据库 DISTINCT。只取已通过的图 —— 待审核图上的分类出现在公开筛选栏
+        // 等于提前泄露了还没过审的内容长什么样。
+        // 注意列名：本项目的库列是驼峰（category / reviewStatus），不是 MP 默认的下划线风格，
+        // 这里走的是字符串列名，写错了不会报错、只会静默查不到 —— 改完必须实测一次。
+        List<Object> categoryRows = this.listObjs(new QueryWrapper<Image>()
+                .select("DISTINCT category")
+                .eq("reviewStatus", ImageConstant.REVIEW_STATUS_PASS));
+        List<String> categories = categoryRows.stream()
+                .filter(Objects::nonNull)
+                .map(Object::toString)
+                .map(String::trim)
+                .filter(s -> !s.isEmpty())
+                .distinct()
+                .sorted()
+                .toList();
+        vo.setCategories(categories);
+
+        // 标签：一行存的是 JSON 数组字符串 ["风景","城市"]，DISTINCT 拆不开，只能取回来在内存里拆。
+        // 图库量级（个人项目）下这个代价可以接受；真到百万级要换"标签表 + 关联表"的方案。
+        List<Object> tagRows = this.listObjs(new QueryWrapper<Image>()
+                .select("tags")
+                .eq("reviewStatus", ImageConstant.REVIEW_STATUS_PASS));
+        com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+        java.util.TreeSet<String> tagSet = new java.util.TreeSet<>();
+        for (Object row : tagRows) {
+            if (row == null) {
+                continue;
+            }
+            String json = row.toString().trim();
+            if (json.isEmpty() || "[]".equals(json)) {
+                continue;
+            }
+            try {
+                List<?> parsed = mapper.readValue(json, List.class);
+                for (Object tag : parsed) {
+                    if (tag != null && !tag.toString().trim().isEmpty()) {
+                        tagSet.add(tag.toString().trim());
+                    }
+                }
+            } catch (Exception e) {
+                // 脏数据不该让整个筛选项接口挂掉：跳过这一行，日志留痕
+                log.warn("解析标签 JSON 失败，已跳过：tags={}", json);
+            }
+        }
+        vo.setTags(new ArrayList<>(tagSet));
+        return vo;
+    }
+
     public ImageVO toImageVO(Image image) {
         if (image == null) {
             return null;
@@ -548,14 +630,19 @@ public class ImageServiceImpl extends ServiceImpl<ImageMapper, Image> implements
      * 不碰 name / url / userId。
      */
     @Override
-    public boolean reviewImage(String id, Integer reviewStatus, String reviewMessage) {
+    public boolean reviewImage(String id, Integer reviewStatus, String reviewMessage, Boolean resetReviewParams) {
         userService.checkAdminUser();
         if (reviewStatus == null
                 || (reviewStatus != ImageConstant.REVIEW_STATUS_PASS
                 && reviewStatus != ImageConstant.REVIEW_STATUS_REJECT)) {
             throw new BusinessException(ErrorCode.PARAMS_ERROR, "审核状态只能是 通过/拒绝");
         }
-        if (reviewStatus == ImageConstant.REVIEW_STATUS_REJECT
+        // null 按「重置」处理：不传这个字段的老客户端，行为必须跟以前完全一致，
+        // 否则一次接口升级就会静默变成「只改状态」，审核人/时间/意见全停在上一版
+        boolean reset = resetReviewParams == null || resetReviewParams;
+        // 「拒绝必填原因」只在会写入意见时才要求：选「仅重置状态」时这条意见不落库，
+        // 强行要原因等于让用户填一个会被丢掉的值
+        if (reset && reviewStatus == ImageConstant.REVIEW_STATUS_REJECT
                 && ParamUtils.isBlank(reviewMessage)) {
             throw new BusinessException(ErrorCode.PARAMS_ERROR, "拒绝时必须填写原因");
         }
@@ -567,20 +654,30 @@ public class ImageServiceImpl extends ServiceImpl<ImageMapper, Image> implements
         }
 
         User reviewer = userService.getLoginUser();
-        Image updateImage = new Image();
-        updateImage.setId(image.getId());
-        updateImage.setReviewStatus(reviewStatus);
-        updateImage.setReviewMessage(ParamUtils.isBlank(reviewMessage) ? null : reviewMessage.trim());
-        updateImage.setReviewerId(reviewer.getId());
-        updateImage.setReviewTime(new Date());
-        // 只 set 审核四字段（NOT_NULL 策略自动跳过 null）—— 审核动不了图的内容和归属
-        boolean result = this.updateById(updateImage);
+        // 用 UpdateWrapper 而不是 updateById(entity)：审核意见要能被显式写成 null
+        // （通过时不留意见），而 MP 的 NOT_NULL 更新策略会跳过 null 字段，做不到「清空」。
+        LambdaUpdateWrapper<Image> wrapper = new LambdaUpdateWrapper<Image>()
+                .eq(Image::getId, imageId)
+                .set(Image::getReviewStatus, reviewStatus);
+
+        if (reset) {
+            // 重置全部审核参数：审核人 / 时间 / 意见 全部以本次为准
+            wrapper.set(Image::getReviewerId, reviewer.getId())
+                    .set(Image::getReviewTime, new Date())
+                    .set(Image::getReviewMessage,
+                            reviewStatus == ImageConstant.REVIEW_STATUS_REJECT
+                                    ? reviewMessage.trim() : null);
+        }
+        // 不重置时只改状态：上一次的审核人 / 时间 / 意见留在库里当历史参考
+        // （前端不展示它们，但管理员需要时能查到「上次是谁、为什么」）
+
+        boolean result = this.update(wrapper);
         if (!result) {
             throw new BusinessException(ErrorCode.OPERATION_ERROR, "审核失败");
         }
-        log.info("图片审核完成：imageId={}, result={}, reviewerId={}",
+        log.info("图片审核完成：imageId={}, result={}, reviewerId={}, resetParams={}",
                 imageId, reviewStatus == ImageConstant.REVIEW_STATUS_PASS ? "通过" : "拒绝",
-                reviewer.getId());
+                reviewer.getId(), reset);
         return true;
     }
 
@@ -591,8 +688,8 @@ public class ImageServiceImpl extends ServiceImpl<ImageMapper, Image> implements
         if (image == null) {
             throw new BusinessException(ErrorCode.NOT_FOUND_ERROR, "图片不存在");
         }
-        // 与查询同一套归属校验：能看就能下载
-        checkImageOwner(image, loginUser);
+        // 与详情同一套可见性：能看就能下载（主页图墙里别人传的已通过图，也能下载）
+        checkImageVisible(image, loginUser);
 
         if (cosManager == null) {
             throw new BusinessException(ErrorCode.SYSTEM_ERROR, "对象存储未配置，无法下载");
@@ -690,14 +787,51 @@ public class ImageServiceImpl extends ServiceImpl<ImageMapper, Image> implements
      */
     private void applyUserScope(LambdaQueryWrapper<Image> wrapper, ImageQueryRequest request, User loginUser) {
         if (isAdmin(loginUser)) {
-            // 管理员：默认查全部；主动传了 userId 就只看那个人的
+            // 管理员：默认查全部；传了 userId 就只看那个人的；审核状态按入参筛（不强制）
             if (!ParamUtils.isBlank(request.getUserId())) {
                 wrapper.eq(Image::getUserId, ParamUtils.parseId(request.getUserId()));
             }
             return;
         }
-        // 普通用户：强制只看自己的（注意这里不看 request.getUserId()）
-        wrapper.eq(Image::getUserId, loginUser.getId());
+
+        // ========== 普通用户两种视角（官方流程的「内容可见性」） ==========
+        // ① 我的图片（显式传自己的 userId）：看自己的**全部状态** ——
+        //    否则刚上传的图立刻"消失"、被拒的图连原因都看不到，用户根本没法申诉
+        // ② 浏览（不传 userId，或传的是别人的）：全站的**已通过**图，即主页图墙
+        //    别人传的 userId 一律当"浏览"处理，不报错也不越权（越权探测不值得给提示）
+        boolean mine = !ParamUtils.isBlank(request.getUserId())
+                && loginUser.getId().equals(ParamUtils.parseId(request.getUserId()));
+        if (mine) {
+            wrapper.eq(Image::getUserId, loginUser.getId());
+            if (request.getReviewStatus() != null) {
+                wrapper.eq(Image::getReviewStatus, request.getReviewStatus());
+            }
+        } else {
+            // 浏览视角下状态由服务端钉死，入参传什么都只看已通过
+            wrapper.eq(Image::getReviewStatus, ImageConstant.REVIEW_STATUS_PASS);
+        }
+    }
+
+    /**
+     * 单张图片的可见性校验（详情 / 下载这类「按 id 取一张」的入口用）。
+     *
+     * <p>规则：本人看自己的全部状态；管理员看全部；<b>其他人只能看已通过的</b>。
+     * 与列表的 {@link #applyUserScope} 同一套语义 —— 列表上看不见的图，
+     * 直接把 id 拼到 URL 上也不该看得见，否则「可见性」只是前端不显示而已。
+     */
+    private void checkImageVisible(Image image, User loginUser) {
+        if (isAdmin(loginUser)) {
+            return;
+        }
+        boolean mine = loginUser.getId().equals(image.getUserId());
+        if (mine) {
+            return;
+        }
+        boolean passed = Integer.valueOf(ImageConstant.REVIEW_STATUS_PASS).equals(image.getReviewStatus());
+        if (!passed) {
+            // 报「不存在」而不是「无权限」：别人无权知道的图，连"存在"这件事都不该暴露
+            throw new BusinessException(ErrorCode.NOT_FOUND_ERROR, "图片不存在");
+        }
     }
 
     /**

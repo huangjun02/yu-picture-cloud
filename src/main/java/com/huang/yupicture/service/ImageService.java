@@ -6,6 +6,7 @@ import com.huang.yupicture.model.dto.image.ImageDownloadResult;
 import com.huang.yupicture.model.dto.image.ImageQueryRequest;
 import com.huang.yupicture.model.dto.image.ImageUpdateRequest;
 import com.huang.yupicture.model.entity.Image;
+import com.huang.yupicture.model.vo.ImageOptionsVO;
 import com.huang.yupicture.model.vo.ImageVO;
 import org.springframework.web.multipart.MultipartFile;
 
@@ -24,7 +25,10 @@ import org.springframework.web.multipart.MultipartFile;
 public interface ImageService extends IService<Image> {
 
     /**
-     * 按 id 查询图片详情（本人或管理员）。
+     * 按 id 查询图片详情。
+     *
+     * <p><b>可见性</b>：本人看自己的全部状态；管理员看全部；其他人只能看已通过的
+     * （主页图墙语义）。别人未通过的图报 40400「图片不存在」—— 连"这张图存在"都不该暴露。
      *
      * @param id 图片 id（字符串形式）
      * @return 脱敏后的图片信息
@@ -46,10 +50,12 @@ public interface ImageService extends IService<Image> {
      *
      * @param id            图片 id
      * @param reviewStatus  审核结果：1-通过 / 2-拒绝（其它值报参数错误）
-     * @param reviewMessage 审核意见（拒绝时必填 —— 没有理由的拒绝比拒绝本身更伤人）
+     * @param reviewMessage     审核意见（拒绝时必填 —— 没有理由的拒绝比拒绝本身更伤人）
+     * @param resetReviewParams 是否重置全部审核参数（审核人 / 时间 / 意见）；
+     *                          false 表示只改状态，上一次的审核信息留作历史参考
      * @return 是否成功
      */
-    boolean reviewImage(String id, Integer reviewStatus, String reviewMessage);
+    boolean reviewImage(String id, Integer reviewStatus, String reviewMessage, Boolean resetReviewParams);
 
     /**
      * 下载图片文件（本人或管理员）。
@@ -65,8 +71,12 @@ public interface ImageService extends IService<Image> {
     /**
      * 分页查询图片。
      *
-     * <p><b>普通用户只能查到自己的图</b>（Service 强制追加 {@code userId} 条件），
-     * 管理员可以查全部、也可以指定 userId 查某个人。
+     * <p><b>普通用户两种视角</b>：
+     * <ul>
+     *   <li>传自己的 userId（「我的图片」页）：自己的全部状态，能看见待审核 / 被拒</li>
+     *   <li>不传 userId（主页浏览）：全站<b>已通过</b>的图</li>
+     * </ul>
+     * 管理员：默认查全部，可指定 userId，也可按 reviewStatus 筛待办。
      *
      * @param imageQueryRequest 分页 + 查询条件
      * @return 分页结果（每页条数已被夹到上限内）
@@ -121,4 +131,13 @@ public interface ImageService extends IService<Image> {
      * @return 脱敏 VO，入参 null 时返回 null
      */
     ImageVO toImageVO(Image image);
+
+    /**
+     * 主页筛选项：当前可见范围内出现过的分类与标签（去重）。
+     *
+     * <p>为什么不固定写死一组分类（官方前台是写死的 demo 列表）：图库的分类/标签
+     * 来自用户自己上传时填的内容，写死的话用户填的分类在主页筛不出来 ——
+     * 筛选项必须从真实数据来，否则"能筛"是假的。
+     */
+    ImageOptionsVO listOptions();
 }

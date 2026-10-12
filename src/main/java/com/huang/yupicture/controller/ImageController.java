@@ -7,6 +7,7 @@ import com.huang.yupicture.model.dto.image.ImageDownloadResult;
 import com.huang.yupicture.model.dto.image.ImageQueryRequest;
 import com.huang.yupicture.model.dto.image.ImageReviewRequest;
 import com.huang.yupicture.model.dto.image.ImageUpdateRequest;
+import com.huang.yupicture.model.vo.ImageOptionsVO;
 import com.huang.yupicture.model.vo.ImageVO;
 import com.huang.yupicture.service.ImageService;
 import io.swagger.v3.oas.annotations.Operation;
@@ -148,7 +149,19 @@ public class ImageController {
     @Operation(summary = "审核图片（管理员）")
     public BaseResponse<Boolean> reviewImage(@RequestBody ImageReviewRequest reviewRequest) {
         return ResultUtils.success(imageService.reviewImage(
-                reviewRequest.getId(), reviewRequest.getReviewStatus(), reviewRequest.getReviewMessage()));
+                reviewRequest.getId(), reviewRequest.getReviewStatus(), reviewRequest.getReviewMessage(),
+                reviewRequest.getResetReviewParams()));
+    }
+
+    /**
+     * 主页筛选项：分类与标签候选（登录即可访问）。
+     *
+     * <p>无参数、无分页 —— 筛选项就是"当前图库里有哪几类、哪些标签"，是一个全集。
+     */
+    @PostMapping("/options")
+    @Operation(summary = "主页筛选项：分类与标签候选（登录用户）")
+    public BaseResponse<ImageOptionsVO> listOptions() {
+        return ResultUtils.success(imageService.listOptions());
     }
 
     /**
