@@ -73,6 +73,15 @@ public class Image implements Serializable {
      */
     private Double picScale;
 
+    /**
+     * 主色调（{@code #RRGGBB}，大写；提取失败为 {@code null}）。
+     *
+     * <p>按颜色搜索的检索维度。上传 / URL 传图时由 {@code ImageUtils.extractMainColor}
+     * 提取，等步长采样 + RGB 量化直方图。{@code null} = 这张图不参与颜色筛选
+     * （派生信息提取失败属正常降级，与缩略图 / WebP 同一条纪律），不是数据缺失。
+     */
+    private String picColor;
+
     /** 格式：jpg / png / webp ... */
     private String picFormat;
 

@@ -83,6 +83,9 @@ public class ImageVO implements Serializable {
     /** 宽高比（宽 / 高），前端用它预留位置防布局抖动 */
     private Double picScale;
 
+    /** 主色调（#RRGGBB，大写；提取失败为 null —— 该图不参与颜色筛选） */
+    private String picColor;
+
     /** 格式：jpg / png / webp */
     private String picFormat;
 

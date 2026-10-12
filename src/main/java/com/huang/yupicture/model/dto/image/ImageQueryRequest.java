@@ -60,6 +60,15 @@ public class ImageQueryRequest extends PageRequest {
     private String picFormat;
 
     /**
+     * 主色调（精确匹配：{@code #RRGGBB}，大小写不敏感 —— 入库统一大写，
+     * 查询侧归一化后比对，前端传小写也能命中）。
+     *
+     * <p>取值来自前端色板的预设色，不是自由文本输入；不合法的值（非 #RRGGBB 格式）
+     * 报 40000，不静默忽略 —— 用户明确选了颜色却搜出全部图，等于筛选失效还不报错。
+     */
+    private String picColor;
+
+    /**
      * 审核状态（精确匹配：0-待审核，1-通过，2-拒绝）。
      *
      * <p>给管理员的审核工作台用 —— 没有这个筛选，前端只能拿当前页数据自己过一遍，
