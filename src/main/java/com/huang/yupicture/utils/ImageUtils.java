@@ -10,7 +10,9 @@ import java.awt.image.BufferedImage;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.util.HashMap;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 
 /**
@@ -122,6 +124,81 @@ public final class ImageUtils {
 
     /** JPEG 压缩质量（0.0~1.0）。0.8 是"肉眼几乎无损、体积减半"的常用起点 */
     public static final float COMPRESS_QUALITY = 0.8f;
+
+    /** 主色提取的采样步长：每 N 个像素采 1 个（大图全扫太慢，颜色统计对精度不敏感） */
+    private static final int COLOR_SAMPLE_STEP = 4;
+
+    /** 主色的量化位数：RGB 每通道只保留高 3 位（8 桶）—— 量化后分桶统计才有意义，
+     *  否则「统计出现最多的颜色」在一亿种取值上几乎每个像素都是独立桶 */
+    private static final int COLOR_QUANTIZE_BITS = 3;
+
+    /**
+     * 提取图片主色调（按颜色搜索用）。
+     *
+     * <p>算法是「RGB 量化 + 直方图统计」：<br>
+     * ① 等步长采样（每 {@value #COLOR_SAMPLE_STEP} 个像素采 1 个，颜色统计对精度不敏感，
+     * 4000×3000 的照片全扫 1200 万次取像素远慢于需要的精度）；<br>
+     * ② 每通道只保留高 {@value #COLOR_QUANTIZE_BITS} 位后拼成桶 key（不量化的话
+     * 几乎每个像素都是独立颜色，「最多」无从统计起）；<br>
+     * ③ 取像素数最多的桶，桶内取均值还原成 {@code #RRGGBB}。
+     *
+     * <p>失败一律返回 {@code null} 而不是抛异常：颜色是搜索的「增强维度」，
+     * 提不出来只是这张图搜不到颜色，不该让上传失败 —— 与缩略图 / WebP 同一条
+     * 「派生物失败不连坐主流程」的纪律。
+     *
+     * @return {@code #RRGGBB}（大写）；解码失败 / 空 bytes 返回 {@code null}
+     */
+    public static String extractMainColor(byte[] bytes) {
+        if (bytes == null || bytes.length == 0) {
+            return null;
+        }
+        try (ByteArrayInputStream inputStream = new ByteArrayInputStream(bytes)) {
+            BufferedImage image = ImageIO.read(inputStream);
+            if (image == null || image.getWidth() <= 0) {
+                return null;
+            }
+            // 桶 key（量化后的 RGB）-> [像素数, R 累计, G 累计, B 累计]
+            Map<Integer, long[]> buckets = new HashMap<>();
+            int step = COLOR_SAMPLE_STEP;
+            for (int y = 0; y < image.getHeight(); y += step) {
+                for (int x = 0; x < image.getWidth(); x += step) {
+                    int rgb = image.getRGB(x, y);
+                    int r = (rgb >> 16) & 0xFF;
+                    int g = (rgb >> 8) & 0xFF;
+                    int b = rgb & 0xFF;
+                    int key = quantize(r) << 6 | quantize(g) << 3 | quantize(b);
+                    long[] bucket = buckets.computeIfAbsent(key, k -> new long[4]);
+                    bucket[0]++;
+                    bucket[1] += r;
+                    bucket[2] += g;
+                    bucket[3] += b;
+                }
+            }
+            if (buckets.isEmpty()) {
+                return null;
+            }
+            // 取像素数最多的桶（并列时取谁都不影响「主色」语义，HashMap 遍历顺序无关紧要）
+            Map.Entry<Integer, long[]> best = null;
+            for (Map.Entry<Integer, long[]> entry : buckets.entrySet()) {
+                if (best == null || entry.getValue()[0] > best.getValue()[0]) {
+                    best = entry;
+                }
+            }
+            long[] stats = best.getValue();
+            // 桶内取均值还原 —— 桶代表一段颜色区间，均值比区间代表值更接近真实观感
+            long r = Math.round(stats[1] / (double) stats[0]);
+            long g = Math.round(stats[2] / (double) stats[0]);
+            long b = Math.round(stats[3] / (double) stats[0]);
+            return String.format("#%02X%02X%02X", r, g, b);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /** 保留 RGB 一个通道的高 3 位（0~7），低 5 位归零 —— 颜色量化的基本操作 */
+    private static int quantize(int channel) {
+        return channel >> COLOR_QUANTIZE_BITS;
+    }
 
     /**
      * 按魔数反推格式（URL 传图用：地址没有后缀时，格式只能看内容）。
