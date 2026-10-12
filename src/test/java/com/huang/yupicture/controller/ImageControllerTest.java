@@ -130,6 +130,12 @@ class ImageControllerTest {
 
     /** 全参数版：显式指定审核状态（默认待审核 —— 上传入口的初始值） */
     private long prepareImage(long userId, String name, String category, String[] tags, int reviewStatus) {
+        return prepareImage(userId, name, category, tags, reviewStatus, null);
+    }
+
+    /** 带主色的重载（颜色筛选用例用） */
+    private long prepareImage(long userId, String name, String category, String[] tags,
+                              int reviewStatus, String picColor) {
         Image image = new Image();
         image.setUrl("https://test-bucket.cos.ap-shanghai.myqcloud.com/test/" + name + ".jpg");
         image.setName(name);
@@ -146,6 +152,7 @@ class ImageControllerTest {
         image.setPicWidth(800);
         image.setPicHeight(600);
         image.setPicScale(800.0 / 600.0);
+        image.setPicColor(picColor);
         image.setPicFormat("jpg");
         image.setUserId(userId);
         image.setReviewStatus(reviewStatus);
@@ -846,5 +853,74 @@ class ImageControllerTest {
 
         assertTrue(tags.contains("脏标签"), "裸字符串标签要能被读出来（宽松解析），不能整条丢掉");
         assertTrue(categories.contains("脏数据分类"));
+    }
+
+    // ==================== 六、按颜色搜索 ====================
+
+    @Test
+    void filterByPicColorShouldReturnExactMatch() throws Exception {
+        long ownerId = prepareUser("img_t_color1", "user");
+        Cookie cookie = loginAndGetCookie("img_t_color1");
+        // 差值法（同口径）：基数和增量都必须带同一个筛选条件 ——
+        // 无条件总数包含库里全部已通过图，跟「按色筛出几张」不是同一口径，比出来必是负数
+        long base = totalOf(cookie, "{\"picColor\":\"#E74C3C\"}");
+        prepareImage(ownerId, "红图", "素材", new String[]{"测试"}, ImageConstant.REVIEW_STATUS_PASS, "#E74C3C");
+        prepareImage(ownerId, "蓝图", "素材", new String[]{"测试"}, ImageConstant.REVIEW_STATUS_PASS, "#1677FF");
+
+        long red = totalOf(cookie, "{\"picColor\":\"#E74C3C\"}") - base;
+        assertEquals(1, red, "按主色精确匹配应恰好命中刚造的红图，实际增量：" + red);
+        // 蓝图不该被红色条件命中；不存在的颜色结果必须为 0（造的红图独占 #E74C3C）
+        assertEquals(0, totalOf(cookie, "{\"picColor\":\"#00BFFF\"}"),
+                "不存在的颜色筛选结果必须为 0");
+    }
+
+    @Test
+    void filterByPicColorShouldBeCaseInsensitive() throws Exception {
+        long ownerId = prepareUser("img_t_color2", "user");
+        Cookie cookie = loginAndGetCookie("img_t_color2");
+        prepareImage(ownerId, "绿图", "素材", new String[]{"测试"}, ImageConstant.REVIEW_STATUS_PASS, "#2ECC71");
+
+        // 入库统一大写；查询传小写要走归一化，两个大小写必须命中同一批
+        assertEquals(totalOf(cookie, "{\"picColor\":\"#2ECC71\"}"),
+                totalOf(cookie, "{\"picColor\":\"#2ecc71\"}"),
+                "颜色筛选必须大小写不敏感（前端色板可能传小写）");
+    }
+
+    @Test
+    void filterByIllegalColorShouldReturn40000() throws Exception {
+        long ownerId = prepareUser("img_t_color3", "user");
+        Cookie cookie = loginAndGetCookie("img_t_color3");
+        preparePassedImage(ownerId, "图", "素材");
+
+        mockMvc.perform(post("/image/list/page").cookie(cookie)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"picColor\":\"red\"}"))
+                .andExpect(jsonPath("$.code").value(40000));
+        mockMvc.perform(post("/image/list/page").cookie(cookie)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"picColor\":\"#12345\"}"))
+                .andExpect(jsonPath("$.code").value(40000));
+    }
+
+    @Test
+    void colorFilterRespectsVisibility() throws Exception {
+        // 可见性与颜色筛选是两个正交的维度：别人的待审核图即使颜色命中也不可见
+        long ownerId = prepareUser("img_t_color4a", "user");
+        long otherId = prepareUser("img_t_color4b", "user");
+        prepareImage(otherId, "别人的红色待审图", "素材", new String[]{"测试"},
+                ImageConstant.REVIEW_STATUS_PENDING, "#E74C3C");
+        Cookie cookie = loginAndGetCookie("img_t_color4a");
+        // ownerId 一张红色已通过的都没有 → 按红色查到的必须全是「已通过」语义下的空
+        // （普通用户浏览视角只见已通过；这里没造自己的红图，断言 0 才说明待审核的没漏进来）
+        mockMvc.perform(post("/image/list/page").cookie(cookie)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"picColor\":\"#E74C3C\"}"))
+                .andExpect(jsonPath("$.code").value(0))
+                .andExpect(jsonPath("$.data.total").value(0));
+        // 管理员能看见（管理员默认查全部）
+        long adminId = prepareUser("img_t_color4admin", "admin");
+        Cookie adminCookie = loginAndGetCookie("img_t_color4admin");
+        assertTrue(totalOf(adminCookie, "{\"picColor\":\"#E74C3C\"}") >= 1,
+                "管理员按颜色应能查到待审核的图（管理员查全部）");
     }
 }
