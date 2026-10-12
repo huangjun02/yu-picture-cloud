@@ -185,6 +185,11 @@ public class CosManager {
      * 前端 img 标签需要 @error 回退原图（个人项目存量图少，不值得写回溯迁移）。
      */
     public String buildThumbnailUrl(String originalUrl) {
+        // webp 源图没有缩略图：推导出来的 xxx_thumb.webp 是不存在的地址，
+        // 交给前端就是一个裂图。返回 null 让调用方回退原图（见 hasDerivatives）
+        if (!hasDerivatives(originalUrl)) {
+            return null;
+        }
         int dot = originalUrl.lastIndexOf('.');
         int slash = originalUrl.lastIndexOf('/');
         // 没有后缀 / 点号在路径分隔符之前（如域名里的点）→ 不像合法的图片 URL，原样返回
@@ -192,6 +197,26 @@ public class CosManager {
             return originalUrl;
         }
         return originalUrl.substring(0, dot) + "_thumb" + originalUrl.substring(dot);
+    }
+
+    /**
+     * 源图有没有派生文件（缩略图 / webp 副本）。
+     *
+     * <p><b>webp 源图一个派生文件都没有</b>：缩略图生成器对 webp 返回 null
+     * （ImageIO 能读不能写 webp），webp 转码器对「已经是 webp」的源图直接跳过。
+     * 所以对 webp 源图推导出来的 {@code xxx_thumb.webp} / {@code xxx_webp.webp}
+     * 都是<b>不存在的地址</b> —— 前端 img 拿去就是裂图。
+     *
+     * <p>判定放在这一层而不是 VO 里：派生文件的命名与生成规则都归本类，
+     * 「哪些源图有派生文件」是这个规则的一部分，拆开就会两处漂移。
+     * 返回 null 而不是一个坏 URL：null 语义是「没有这个派生文件」，
+     * 调用方（VO + 前端 @error）自然回退原图。
+     */
+    private static boolean hasDerivatives(String originalUrl) {
+        if (originalUrl == null || originalUrl.isEmpty()) {
+            return false;
+        }
+        return !originalUrl.toLowerCase(Locale.ROOT).endsWith(".webp");
     }
 
     /** 从对象键取小写后缀（不含点号）。键由本类自己生成，格式可控 */
@@ -231,6 +256,11 @@ public class CosManager {
      * 前端按需加载、失败回退原图即可。
      */
     public String buildWebpUrl(String originalUrl) {
+        // 源图已经是 webp 时不会生成 _webp 副本（转码方法对 webp 输入直接跳过），
+        // 推导出来同样是不存在的地址 → null 回退原图
+        if (!hasDerivatives(originalUrl)) {
+            return null;
+        }
         int dot = originalUrl.lastIndexOf('.');
         int slash = originalUrl.lastIndexOf('/');
         if (dot < 0 || dot < slash) {
