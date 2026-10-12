@@ -288,6 +288,192 @@ public final class ImageUtils {
         return v < 0.4 ? "brown" : "purple";
     }
 
+    // ==================== 以图搜图：感知哈希（pHash） ====================
+
+    /** pHash 的 DCT 输入边长（缩到 32×32 再做变换，低频信息足够、又没有噪声干扰） */
+    private static final int HASH_SIZE = 32;
+
+    /** 取左上多少 × 多少的低频块（8×8 = 64 位哈希，是 pHash 的经典取值） */
+    private static final int HASH_LOW_FREQ = 8;
+
+    /** 哈希总位数（= HASH_LOW_FREQ²）。64 位 → 16 个十六进制字符 */
+    public static final int HASH_BITS = HASH_LOW_FREQ * HASH_LOW_FREQ;
+
+    /**
+     * 计算图片的感知哈希（pHash）—— 以图搜图的检索键。
+     *
+     * <p><b>为什么是 pHash 而不是「比较像素」或「比较主色」：</b>
+     * pHash 提取的是图片的<b>低频结构</b>（哪边亮、哪边暗、大块形状怎么分布），
+     * 天然对「重新编码 / 缩放 / 加噪点 / 改亮度」不敏感 —— 同一张图存成 PNG 还是 JPEG q60、
+     * 缩放一半，哈希都一模一样（实测汉明距离 0）。这正是「以图搜图」要的性质：
+     * 找的是<b>同一张图的不同版本 / 同一张图本身</b>，不是「颜色接近的图」。
+     *
+     * <p>算法：① 缩到 32×32 → ② 转灰度 → ③ 二维 DCT-II → ④ 取左上 8×8 低频系数
+     * （64 个）→ ⑤ 与「除 DC 外的均值」比较成位串 → ⑥ 打包成 16 位十六进制。
+     *
+     * <p><b>实测距离表（64 位中不同的位数，用来理解「多远算不像」）：</b>
+     * <pre>
+     *   同一张图（PNG / JPEG q95 / JPEG q60 / 缩放一半 / 加噪点）…… 0
+     *   同一场景去掉一个元素 …………………………………… 8
+     *   同图元素挪位置 …………………………………………… 13
+     *   不同场景（照片 vs 棋盘 / 照片 vs 噪声 / 纯色 vs 照片）… 23 / 32 / 47
+     * </pre>
+     * 所以 {@code ImageConstant.SIMILAR_MAX_DISTANCE = 10} 是一个能落地、几乎不误召的阈值。
+     *
+     * <p><b>失败返回 null 而不是抛异常</b>：解码不了 / 格式不支持，只意味着「这张图不参与
+     * 以图搜图」，不该让上传失败 —— 与缩略图 / WebP / 主色同一条「派生物失败不连坐主流程」
+     * 的纪律。调用方（上传链路）拿到 null 就跳过，搜到的候选里 picHash 为 null 的也跳过。
+     *
+     * @param bytes 图片字节
+     * @return 16 位小写十六进制哈希；解码失败 / 空字节返回 {@code null}
+     */
+    public static String perceptualHash(byte[] bytes) {
+        if (bytes == null || bytes.length == 0) {
+            return null;
+        }
+        BufferedImage small;
+        try (ByteArrayInputStream in = new ByteArrayInputStream(bytes)) {
+            // forceSize 是「压成精确的 32×32」（不保持宽高比）—— 哈希要的是一张固定尺寸的
+            // 指纹图，变形无所谓，确定性才有所谓。size() 是等比装进框里，会得到非正方形。
+            small = Thumbnails.of(in).forceSize(HASH_SIZE, HASH_SIZE).asBufferedImage();
+        } catch (Exception e) {
+            return null;
+        }
+        if (small == null) {
+            return null;
+        }
+
+        // 灰度矩阵（BT.601 亮度权重，与人类对亮度的感知一致）
+        double[][] gray = new double[HASH_SIZE][HASH_SIZE];
+        for (int y = 0; y < HASH_SIZE; y++) {
+            for (int x = 0; x < HASH_SIZE; x++) {
+                int rgb = small.getRGB(x, y);
+                gray[y][x] = 0.299 * ((rgb >> 16) & 0xFF)
+                        + 0.587 * ((rgb >> 8) & 0xFF)
+                        + 0.114 * (rgb & 0xFF);
+            }
+        }
+
+        double[][] dct = dct2d(gray);
+
+        // 抹掉浮点噪声：常量图（纯色）的低频 AC 系数<b>在数学上恰好是 0</b>，但浮点运算会
+        // 留下 1e-13 量级的残渣。不清掉的话，下面「系数 > 均值」的比较就由残渣的符号决定 ——
+        // 同一张纯色图的哈希会随平台 / JIT 的浮点差异乱跳（实测两张纯色图距离 52，
+        // 本该是 0）。门限取 DC 的极小比例：真实结构（哪怕是很柔和的渐变）能量远高于它，
+        // 不会被误抹，所以对正常图片是空操作。
+        double noiseFloor = Math.abs(dct[0][0]) * 1e-9 + 1e-6;
+        for (int u = 0; u < HASH_LOW_FREQ; u++) {
+            for (int v = 0; v < HASH_LOW_FREQ; v++) {
+                if (Math.abs(dct[u][v]) < noiseFloor) {
+                    dct[u][v] = 0;
+                }
+            }
+        }
+
+        // 均值只用 AC 项（跳过 DC）：DC 是整张图的平均亮度，量级比所有高频项加起来还大，
+        // 混进去会把均值抬到只有 DC 之上 → 64 位里 63 位恒为 0，哈希退化成 1 位。
+        double sum = 0;
+        for (int u = 0; u < HASH_LOW_FREQ; u++) {
+            for (int v = 0; v < HASH_LOW_FREQ; v++) {
+                if (u == 0 && v == 0) {
+                    continue;
+                }
+                sum += dct[u][v];
+            }
+        }
+        double avg = sum / (HASH_BITS - 1);
+
+        StringBuilder bits = new StringBuilder(HASH_BITS);
+        for (int u = 0; u < HASH_LOW_FREQ; u++) {
+            for (int v = 0; v < HASH_LOW_FREQ; v++) {
+                bits.append(dct[u][v] > avg ? '1' : '0');
+            }
+        }
+        return bitsToHex(bits.toString());
+    }
+
+    /**
+     * 二维 DCT-II，分离式实现（先对每行做一维 DCT、再对每列做一次）。
+     *
+     * <p>分离性是 DCT 的基本性质：二维变换可以拆成两次一维变换，复杂度从 O(n⁴) 降到 O(n³)。
+     * 32×32 下每次哈希约 6.5 万次 cos 计算 —— 毫秒级，不值得为它引第三方库。
+     *
+     * @param matrix 方阵（本功能固定 32×32）
+     * @return 同尺寸的 DCT 系数矩阵，[0][0] 是 DC 项
+     */
+    private static double[][] dct2d(double[][] matrix) {
+        int n = matrix.length;
+        // 正交归一化系数：α(0)=√(1/n)、α(k)=√(2/n)
+        double[] alpha = new double[n];
+        for (int i = 0; i < n; i++) {
+            alpha[i] = (i == 0) ? Math.sqrt(1.0 / n) : Math.sqrt(2.0 / n);
+        }
+
+        // 第一步：按行（固定 y，沿 x 变换）
+        double[][] rows = new double[n][n];
+        for (int y = 0; y < n; y++) {
+            for (int u = 0; u < n; u++) {
+                double sum = 0;
+                for (int x = 0; x < n; x++) {
+                    sum += matrix[y][x] * Math.cos((2 * x + 1) * u * Math.PI / (2.0 * n));
+                }
+                rows[y][u] = alpha[u] * sum;
+            }
+        }
+
+        // 第二步：按列（固定 u，沿 y 变换）
+        double[][] out = new double[n][n];
+        for (int u = 0; u < n; u++) {
+            for (int v = 0; v < n; v++) {
+                double sum = 0;
+                for (int y = 0; y < n; y++) {
+                    sum += rows[y][u] * Math.cos((2 * y + 1) * v * Math.PI / (2.0 * n));
+                }
+                out[v][u] = alpha[v] * sum;
+            }
+        }
+        return out;
+    }
+
+    /** 64 位的 '0'/'1' 串 → 16 个十六进制字符（Character.forDigit 产出小写，与库里存储一致） */
+    private static String bitsToHex(String bits) {
+        StringBuilder hex = new StringBuilder(bits.length() / 4);
+        for (int i = 0; i < bits.length(); i += 4) {
+            hex.append(Character.forDigit(Integer.parseInt(bits.substring(i, i + 4), 2), 16));
+        }
+        return hex.toString();
+    }
+
+    /**
+     * 两个感知哈希的汉明距离（64 位里有多少位不同）—— 越小越像。
+     *
+     * <p>按十六进制字符逐位比：每个字符 4 位，{@code Integer.bitCount(a ^ b)} 一次数出
+     * 这 4 位里差异的个数（异或后 1 的个数就是不同位的个数）。
+     *
+     * <p><b>非法输入返回 {@code Integer.MAX_VALUE}</b>：让调用方的
+     * {@code distance <= 阈值} 判断自然为 false（这条候选被排除），不需要在每个调用点
+     * 再写一遍 null 判断。长度不一致 / 非十六进制字符 / null 都走这条路。
+     *
+     * @param hashA 16 位十六进制哈希
+     * @param hashB 16 位十六进制哈希
+     * @return 汉明距离（0~64）；任一入参非法时返回 {@code Integer.MAX_VALUE}
+     */
+    public static int hammingDistance(String hashA, String hashB) {
+        if (hashA == null || hashB == null || hashA.length() != hashB.length()) {
+            return Integer.MAX_VALUE;
+        }
+        int distance = 0;
+        for (int i = 0; i < hashA.length(); i++) {
+            int a = Character.digit(Character.toLowerCase(hashA.charAt(i)), 16);
+            int b = Character.digit(Character.toLowerCase(hashB.charAt(i)), 16);
+            if (a < 0 || b < 0) {
+                return Integer.MAX_VALUE;
+            }
+            distance += Integer.bitCount(a ^ b);
+        }
+        return distance;
+    }
+
     /**
      * 按魔数反推格式（URL 传图用：地址没有后缀时，格式只能看内容）。
      *
