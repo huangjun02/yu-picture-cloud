@@ -29,6 +29,15 @@ public class ImageVO implements Serializable {
     /** 图片访问地址（COS 公网 URL，前端直接丢给 img 标签） */
     private String url;
 
+    /**
+     * 缩略图地址（200×200 以内的等比小图，列表页用它，详情页才用 {@link #url}）。
+     *
+     * <p>webp 图或「原图本身就比 200 小」时为 <b>null</b> —— 前端拿到 null 回退用 {@code url}。
+     * 另注意：功能上线前的存量图没有缩略图文件，此时该地址会 404，
+     * 前端 img 用 @error 事件回退原图即可。
+     */
+    private String thumbnailUrl;
+
     /** 图片名称 */
     private String name;
 

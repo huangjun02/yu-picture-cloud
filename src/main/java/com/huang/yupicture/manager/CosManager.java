@@ -15,6 +15,7 @@ import org.springframework.web.multipart.MultipartFile;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.util.Locale;
 import java.util.UUID;
 
 /**
@@ -77,8 +78,17 @@ public class CosManager {
      * @return 对象键，如 {@code public/3f2a...c9.jpg}
      */
     public String upload(byte[] bytes, String suffix, String contentType) {
-        String key = buildKey(suffix);
+        // 随机生成 key，委托给"带 key"的核心版本：上传逻辑只存在一份
+        return upload(bytes, suffix, contentType, buildKey(suffix));
+    }
 
+    /**
+     * 上传的核心实现：key 由调用方给定。
+     *
+     * <p>原图走随机 UUID key（见 {@link #buildKey}），缩略图走推导 key（紧跟原图）——
+     * 两条路共用这里，落对象、记日志、异常翻译只写一遍。
+     */
+    private String upload(byte[] bytes, String suffix, String contentType, String key) {
         ObjectMetadata metadata = new ObjectMetadata();
         metadata.setContentLength(bytes.length);
         // 存对 Content-Type，浏览器访问时才知道怎么渲染（否则可能被当成下载）
@@ -97,6 +107,68 @@ public class CosManager {
             log.error("上传文件到 COS 失败：key={}", key, e);
             throw new BusinessException(ErrorCode.SYSTEM_ERROR, "图片上传失败");
         }
+    }
+
+    /**
+     * 上传缩略图，对象键由原图 key 推导。
+     *
+     * <p><b>为什么库里不加 thumbnailUrl 列，靠推导：</b>缩略图和原图是同一次上传的产物，
+     * key 规律固定为 {@code xxx.jpg -> xxx_thumb.jpg}（{@link #buildThumbnailKey}）。
+     * 能推导出来的信息不落库 —— 少一列就少一份"两列对不上"的风险
+     * （列会被人改、会被忘更新，推导规则不会）。代价是规则必须集中在这一处，
+     * 改布局时只改这里 + VO 拼装处。
+     *
+     * @param thumbnailBytes 缩略图字节（调用方已判空，null 不会传到这里）
+     * @param originalKey    原图的对象键
+     * @return 缩略图对象键
+     */
+    public String uploadThumbnail(byte[] thumbnailBytes, String originalKey) {
+        String thumbKey = buildThumbnailKey(originalKey);
+        // 缩略图保持原图格式（png 缩略图还是 png），Content-Type 按后缀给
+        String contentType = thumbKey.endsWith(".png") ? "image/png" : "image/jpeg";
+        return upload(thumbnailBytes, suffixOf(thumbKey), contentType, thumbKey);
+    }
+
+    /**
+     * 由原图对象键推导缩略图对象键：{@code public/abc.jpg -> public/abc_thumb.jpg}。
+     * <b>包级私有</b>（key 推导是本类内部约定，不外泄）；Service 想删缩略图走
+     * {@link #deleteThumbnail(String)}，想拼 URL 走 {@link #buildThumbnailUrl(String)}。
+     */
+    String buildThumbnailKey(String originalKey) {
+        int dot = originalKey.lastIndexOf('.');
+        return originalKey.substring(0, dot) + "_thumb" + originalKey.substring(dot);
+    }
+
+    /**
+     * 删除某张原图对应的缩略图（删图 / 上传回滚时用）。
+     *
+     * <p>推导规则收敛在这一处：Service 只说"删这张图的缩略图"，
+     * 不需要知道 {@code _thumb} 命名约定 —— 将来改布局（比如缩略图挪独立前缀）
+     * 只动本类。
+     */
+    public void deleteThumbnail(String originalKey) {
+        delete(buildThumbnailKey(originalKey));
+    }
+
+    /**
+     * 由原图公网 URL 推导缩略图 URL（VO 拼装用），推导规则与 {@link #buildThumbnailKey} 同源。
+     *
+     * <p>⚠️ 已知局限：本功能上线前上传的旧图没有缩略图文件，推导出的 URL 会 404 ——
+     * 前端 img 标签需要 @error 回退原图（个人项目存量图少，不值得写回溯迁移）。
+     */
+    public String buildThumbnailUrl(String originalUrl) {
+        int dot = originalUrl.lastIndexOf('.');
+        int slash = originalUrl.lastIndexOf('/');
+        // 没有后缀 / 点号在路径分隔符之前（如域名里的点）→ 不像合法的图片 URL，原样返回
+        if (dot < 0 || dot < slash) {
+            return originalUrl;
+        }
+        return originalUrl.substring(0, dot) + "_thumb" + originalUrl.substring(dot);
+    }
+
+    /** 从对象键取小写后缀（不含点号）。键由本类自己生成，格式可控 */
+    private static String suffixOf(String key) {
+        return key.substring(key.lastIndexOf('.') + 1).toLowerCase(Locale.ROOT);
     }
 
     /**

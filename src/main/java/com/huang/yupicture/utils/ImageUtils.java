@@ -173,6 +173,64 @@ public final class ImageUtils {
         return out.toByteArray();
     }
 
+    /** 缩略图边长上限（px）。列表页图片格子就是 200×200，缩略图没必要比格子还大 */
+    public static final int THUMBNAIL_SIZE = 200;
+
+    /**
+     * 生成缩略图（列表页专用的小尺寸版本）。
+     *
+     * <p><b>为什么要有缩略图：</b>列表页一页 10 张图，每张都拉原图（几百 KB ~ 几 MB），
+     * 而展示的格子只有 200×200 —— 带宽和加载时间是「缩小 10 倍也看不出来」的白白浪费。
+     * 压缩（{@link #compress}）省的是「同一张图的冗余质量」，缩略图省的是
+     * 「根本不需要那么大」—— 两者的浪费来源不同，所以两个都要做。
+     *
+     * <p><b>等比缩放，不变形：</b>{@code size(200, 200)} 的语义是「装进 200×200 的框里，
+     * 保持宽高比」—— 800×400 的图会缩成 200×100，而不是硬拉成 200×200 的正方形。
+     * （要「强行填满」得用 {@code forceSize}，那是另一回事，图库场景不用。）
+     *
+     * <p><b>守门：已经比缩略图还小的图不放大。</b>一张 100×100 的头像放大到 200×200
+     * 只会变糊、变大（插值出来的像素不携带新信息）—— 和压缩「压完不比原始小就放弃」
+     * 是同一个思想：<b>处理是手段，收益才是目的。</b>
+     *
+     * <p><b>webp 返回 null（而不是抛异常）</b>：JDK 的 ImageIO 能读不能写 webp
+     * （{@link #readSize} 读不出 webp 尺寸是同一个根源），这不是「这张图有问题」，
+     * 而是「这个格式目前不支持生成缩略图」—— 调用方拿到 null 就跳过，
+     * 列表页回退到原图，功能不坏。
+     *
+     * @param bytes  图片字节（已通过魔数校验）
+     * @param suffix 小写后缀（jpg / jpeg / png / webp）
+     * @return 缩略图字节；webp 或「比缩略图还小」时返回 null（调用方跳过即可）
+     */
+    public static byte[] thumbnail(byte[] bytes, String suffix) {
+        // ① webp 造不了缩略图 → null，调用方回退原图
+        if ("webp".equals(suffix)) {
+            return null;
+        }
+
+        // ② 守门：小图不放大（先量尺寸再决定要不要动手，跟压缩的"压完比大小"前后呼应：
+        //    压缩是"做完检查值不值"，缩略图是"做之前就知道不值"—— 能提前判断的就别浪费那次编解码）
+        int[] size = readSize(bytes);
+        if (size != null && size[0] <= THUMBNAIL_SIZE && size[1] <= THUMBNAIL_SIZE) {
+            return null;
+        }
+
+        // ③ 缩略图保持原格式：PNG 转 JPEG 会丢透明通道（压缩模块验证过的坑），这里不重蹈覆辙
+        String outputFormat = "png".equals(suffix) ? "png" : "jpeg";
+
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        try {
+            Thumbnails.of(new ByteArrayInputStream(bytes))
+                    .size(THUMBNAIL_SIZE, THUMBNAIL_SIZE)   // 等比缩放进 200×200 的框
+                    .outputFormat(outputFormat)
+                    .outputQuality(COMPRESS_QUALITY)        // 对 jpeg 生效；png 无损格式自动忽略
+                    .toOutputStream(out);
+        } catch (IOException e) {
+            // 与 compress() 同一处置：不外抛受检异常，但也不静默吞掉 —— 翻译成系统异常
+            throw new BusinessException(ErrorCode.SYSTEM_ERROR, "缩略图生成失败");
+        }
+        return out.toByteArray();
+    }
+
     /**
      * 按后缀比对文件头。
      *

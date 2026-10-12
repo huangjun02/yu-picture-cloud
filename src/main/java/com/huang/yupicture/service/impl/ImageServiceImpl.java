@@ -187,6 +187,15 @@ public class ImageServiceImpl extends ServiceImpl<ImageMapper, Image> implements
                 // 删文件本身失败会抛异常并中止本次删除 —— 这是有意的：
                 // 让用户看到"删除失败，请重试"，远好过悄悄留下一个没人引用的孤儿文件
                 cosManager.delete(key);
+                // 缩略图跟着删：COS 删除不存在的对象不报错（幂等），所以
+                // 旧图没缩略图 / 缩略图当年上传失败，这里都不会炸 —— 尽力而为的清理
+                try {
+                    cosManager.deleteThumbnail(key);
+                } catch (BusinessException e) {
+                    // 缩略图清理失败不中止删除：原图都删了，别让一个派生文件卡死主流程。
+                    // 但必须留痕 —— 这条缩略图从此变成没人引用的孤儿，要人工/定时任务兜底
+                    log.warn("缩略图删除失败（需人工清理）：imageKey={}", key, e);
+                }
             }
         }
 
@@ -247,6 +256,20 @@ public class ImageServiceImpl extends ServiceImpl<ImageMapper, Image> implements
         String key = cosManager.upload(bytes, suffix, file.getContentType());
         String url = cosManager.buildUrl(key);
 
+        // ========== 阶段二点五：缩略图（增强，不是主功能） ==========
+        // 生成 / 上传失败只记 warn 降级：缩略图挂了列表页回退原图，主功能"能传图"不受连坐。
+        // 对比原图上传（失败必须抛）：原图是用户要的核心产物，缩略图是派生产物，
+        // 派生物的失败不该让核心操作白跑。
+        String thumbnailKey = null;
+        byte[] thumbnailBytes = ImageUtils.thumbnail(bytes, suffix);
+        if (thumbnailBytes != null) {
+            try {
+                thumbnailKey = cosManager.uploadThumbnail(thumbnailBytes, key);
+            } catch (BusinessException e) {
+                log.warn("缩略图上传失败，列表页将回退原图：imageKey={}", key, e);
+            }
+        }
+
         // ========== 阶段三：落库 ==========
         Image image = new Image();
         image.setUrl(url);
@@ -272,9 +295,13 @@ public class ImageServiceImpl extends ServiceImpl<ImageMapper, Image> implements
             log.error("图片记录保存失败，回滚已上传的文件：key={}", key);
             try {
                 cosManager.delete(key);
+                // 缩略图跟着一起回滚：库里没有记录指向它们，留在桶上就是永远没人管的孤儿文件
+                if (thumbnailKey != null) {
+                    cosManager.delete(thumbnailKey);
+                }
             } catch (Exception e) {
                 // 回滚也失败：只能留日志给人工/定时任务兜底，但绝不能掩盖原始失败原因
-                log.error("回滚删除 COS 文件失败，需人工清理：key={}", key, e);
+                log.error("回滚删除 COS 文件失败，需人工清理：key={}, thumbnailKey={}", key, thumbnailKey, e);
             }
             throw new BusinessException(ErrorCode.OPERATION_ERROR, "上传失败，请重试");
         }
@@ -311,6 +338,10 @@ public class ImageServiceImpl extends ServiceImpl<ImageMapper, Image> implements
         // 雪花 id 一律字符串化：19 位 Long 直出给 JS 会丢精度（末尾几位变 0）
         imageVO.setId(String.valueOf(image.getId()));
         imageVO.setUrl(image.getUrl());
+        // thumbnailUrl 是推导出来的，不是表里的列 —— 库里只存原图地址这一个"事实"，
+        // 派生信息在使用时现算，两处数据永远不会对不上
+        imageVO.setThumbnailUrl(cosManager != null
+                ? cosManager.buildThumbnailUrl(image.getUrl()) : null);
         imageVO.setName(image.getName());
         imageVO.setIntroduction(image.getIntroduction());
         imageVO.setCategory(image.getCategory());
