@@ -937,4 +937,104 @@ class ImageControllerTest {
         assertTrue(totalOf(adminCookie, "{\"picColor\":\"#E74C3C\"}") >= 1,
                 "管理员按颜色应能查到待审核的图（管理员查全部）");
     }
+
+    // ==================== 七、图片分享短链 ====================
+
+    /** 给图片设置分享码（直接改库，绕过生成接口 —— 查看用例不依赖生成逻辑） */
+    private void setShareCode(long imageId, String shareCode) {
+        Image patch = new Image();
+        patch.setId(imageId);
+        patch.setShareCode(shareCode);
+        imageService.updateById(patch);
+    }
+
+    @Test
+    void shareImageShouldRequireOwner() throws Exception {
+        long ownerId = prepareUser("img_s_owner1", "user");
+        long imageId = prepareImage(ownerId, "要分享的图", "风景");
+
+        // 未登录 → 被全局拦截器拦下（40100）
+        mockMvc.perform(post("/image/share").param("id", String.valueOf(imageId)))
+                .andExpect(jsonPath("$.code").value(40100));
+
+        // 别人 → 40101（归属校验），且不能真的写入分享码
+        prepareUser("img_s_other1", "user");
+        Cookie otherCookie = loginAndGetCookie("img_s_other1");
+        mockMvc.perform(post("/image/share").cookie(otherCookie).param("id", String.valueOf(imageId)))
+                .andExpect(jsonPath("$.code").value(40101));
+        assertNull(imageService.getById(imageId).getShareCode(), "越权分享不能真的写入分享码");
+    }
+
+    @Test
+    void shareImageShouldGenerateAndBeIdempotent() throws Exception {
+        long ownerId = prepareUser("img_s_owner2", "user");
+        Cookie cookie = loginAndGetCookie("img_s_owner2");
+        long imageId = prepareImage(ownerId, "要分享的图", "风景");
+
+        MvcResult first = mockMvc.perform(post("/image/share").cookie(cookie).param("id", String.valueOf(imageId)))
+                .andExpect(jsonPath("$.code").value(0))
+                .andReturn();
+        String code1 = objectMapper.readTree(first.getResponse().getContentAsString(StandardCharsets.UTF_8))
+                .path("data").asText();
+        assertFalse(code1.isBlank(), "要返回一个非空分享码");
+        assertEquals(code1, imageService.getById(imageId).getShareCode(), "分享码要落库");
+
+        // 再点一次分享：复用同一个码（幂等 —— 重复分享不该产生一串不同链接）
+        MvcResult second = mockMvc.perform(post("/image/share").cookie(cookie).param("id", String.valueOf(imageId)))
+                .andExpect(jsonPath("$.code").value(0))
+                .andReturn();
+        String code2 = objectMapper.readTree(second.getResponse().getContentAsString(StandardCharsets.UTF_8))
+                .path("data").asText();
+        assertEquals(code1, code2, "重复分享必须返回同一个码（幂等）");
+    }
+
+    @Test
+    void shareViewShouldBeAnonymousForPassedImage() throws Exception {
+        long ownerId = prepareUser("img_s_owner3", "user");
+        long imageId = preparePassedImage(ownerId, "可分享的图", "风景");
+        setShareCode(imageId, "sharePassed123");
+
+        // 不带 cookie（游客）→ 免登录可看已通过的图
+        mockMvc.perform(post("/image/share/view").param("shareCode", "sharePassed123"))
+                .andExpect(jsonPath("$.code").value(0))
+                .andExpect(jsonPath("$.data.name").value("可分享的图"));
+    }
+
+    @Test
+    void shareViewShouldHideOthersPendingImage() throws Exception {
+        long ownerId = prepareUser("img_s_owner4", "user");
+        long imageId = prepareImage(ownerId, "别人的待审核图", "风景");   // PENDING
+        setShareCode(imageId, "sharePending123");
+
+        // 游客打开未通过审核的短链 → 40400（与可见性一致）
+        mockMvc.perform(post("/image/share/view").param("shareCode", "sharePending123"))
+                .andExpect(jsonPath("$.code").value(40400));
+
+        // 本人带登录态打开自己的 → 可见
+        Cookie cookie = loginAndGetCookie("img_s_owner4");
+        mockMvc.perform(post("/image/share/view").cookie(cookie).param("shareCode", "sharePending123"))
+                .andExpect(jsonPath("$.code").value(0))
+                .andExpect(jsonPath("$.data.name").value("别人的待审核图"));
+    }
+
+    @Test
+    void shareViewShouldReturn404ForUnknownOrDeletedAnd400ForBlank() throws Exception {
+        // 不存在的码 → 40400
+        mockMvc.perform(post("/image/share/view").param("shareCode", "nope00000"))
+                .andExpect(jsonPath("$.code").value(40400));
+
+        // 空码 → 40000（参数错误，与"数据不存在"分开）
+        mockMvc.perform(post("/image/share/view").param("shareCode", ""))
+                .andExpect(jsonPath("$.code").value(40000));
+
+        // 已删除的图：短链应"失效"（逻辑删除后按码查不到）
+        long ownerId = prepareUser("img_s_owner5", "user");
+        long imageId = preparePassedImage(ownerId, "将被删的图", "风景");
+        setShareCode(imageId, "shareDeleted123");
+        Cookie cookie = loginAndGetCookie("img_s_owner5");
+        mockMvc.perform(post("/image/delete").cookie(cookie).param("id", String.valueOf(imageId)))
+                .andExpect(jsonPath("$.code").value(0));
+        mockMvc.perform(post("/image/share/view").param("shareCode", "shareDeleted123"))
+                .andExpect(jsonPath("$.code").value(40400));
+    }
 }
