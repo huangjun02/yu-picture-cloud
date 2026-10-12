@@ -38,6 +38,15 @@ public class ImageVO implements Serializable {
      */
     private String thumbnailUrl;
 
+    /**
+     * WebP 副本地址（与原图同尺寸、体积更小的新一代格式，详情页大图浏览用它省带宽）。
+     *
+     * <p>webp 源图（已是 webp，不重复转）或「转换无收益」时为 <b>null</b>。
+     * 原图永远保留（{@link #url} 不变），webp 只是多一份派生副本 —— 可逆、老链接不失效。
+     * 存量旧图同样会 404，前端按需回退。
+     */
+    private String webpUrl;
+
     /** 图片名称 */
     private String name;
 

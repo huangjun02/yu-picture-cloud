@@ -172,6 +172,46 @@ public class CosManager {
     }
 
     /**
+     * 上传 WebP 副本，对象键由原图 key 推导（{@code public/abc.jpg -> public/abc_webp.webp}）。
+     * 推导思想与缩略图相同：能确定性推导的信息不落库。
+     *
+     * <p>Content-Type 用 {@code image/webp}：浏览器按它渲染，写错会被当成下载。
+     */
+    public String uploadWebp(byte[] webpBytes, String originalKey) {
+        String webpKey = buildWebpKey(originalKey);
+        return upload(webpBytes, "webp", "image/webp", webpKey);
+    }
+
+    /**
+     * 由原图对象键推导 WebP 副本对象键。包级私有 —— 命名约定不外泄，
+     * Service 走 {@link #deleteWebp(String)}，VO 拼 URL 走 {@link #buildWebpUrl(String)}。
+     */
+    String buildWebpKey(String originalKey) {
+        int dot = originalKey.lastIndexOf('.');
+        return originalKey.substring(0, dot) + "_webp.webp";
+    }
+
+    /** 删除某张原图对应的 WebP 副本（删图 / 上传回滚时用），语义同 {@link #deleteThumbnail(String)} */
+    public void deleteWebp(String originalKey) {
+        delete(buildWebpKey(originalKey));
+    }
+
+    /**
+     * 由原图公网 URL 推导 WebP 副本 URL（VO 拼装用）。
+     *
+     * <p>⚠️ 与缩略图同样的已知局限：功能上线前的存量图没有 webp 副本，会 404 ——
+     * 前端按需加载、失败回退原图即可。
+     */
+    public String buildWebpUrl(String originalUrl) {
+        int dot = originalUrl.lastIndexOf('.');
+        int slash = originalUrl.lastIndexOf('/');
+        if (dot < 0 || dot < slash) {
+            return originalUrl;
+        }
+        return originalUrl.substring(0, dot) + "_webp.webp";
+    }
+
+    /**
      * 生成对象键。
      *
      * <p><b>为什么用 UUID 而不是原始文件名：</b>

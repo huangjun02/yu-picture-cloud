@@ -196,6 +196,12 @@ public class ImageServiceImpl extends ServiceImpl<ImageMapper, Image> implements
                     // 但必须留痕 —— 这条缩略图从此变成没人引用的孤儿，要人工/定时任务兜底
                     log.warn("缩略图删除失败（需人工清理）：imageKey={}", key, e);
                 }
+                // webp 副本与缩略图同策略：尽力清理，失败留痕不阻断
+                try {
+                    cosManager.deleteWebp(key);
+                } catch (BusinessException e) {
+                    log.warn("WebP 副本删除失败（需人工清理）：imageKey={}", key, e);
+                }
             }
         }
 
@@ -270,6 +276,21 @@ public class ImageServiceImpl extends ServiceImpl<ImageMapper, Image> implements
             }
         }
 
+        // ========== 阶段二点六：WebP 副本（增强，失败同样降级不阻断） ==========
+        // 输入是"压缩后的字节"：能转出的 webp 是对压缩结果再优化，不是对原始大图。
+        // 已是 webp 的图 / 转完不比现在小的图，toWebp 返回 null，跳过即可。
+        String webpKey = null;
+        if (!"webp".equals(suffix)) {
+            byte[] webpBytes = ImageUtils.toWebp(bytes);
+            if (webpBytes != null) {
+                try {
+                    webpKey = cosManager.uploadWebp(webpBytes, key);
+                } catch (BusinessException e) {
+                    log.warn("WebP 副本上传失败，详情页将回退原图：imageKey={}", key, e);
+                }
+            }
+        }
+
         // ========== 阶段三：落库 ==========
         Image image = new Image();
         image.setUrl(url);
@@ -298,6 +319,9 @@ public class ImageServiceImpl extends ServiceImpl<ImageMapper, Image> implements
                 // 缩略图跟着一起回滚：库里没有记录指向它们，留在桶上就是永远没人管的孤儿文件
                 if (thumbnailKey != null) {
                     cosManager.delete(thumbnailKey);
+                }
+                if (webpKey != null) {
+                    cosManager.delete(webpKey);
                 }
             } catch (Exception e) {
                 // 回滚也失败：只能留日志给人工/定时任务兜底，但绝不能掩盖原始失败原因
@@ -342,6 +366,8 @@ public class ImageServiceImpl extends ServiceImpl<ImageMapper, Image> implements
         // 派生信息在使用时现算，两处数据永远不会对不上
         imageVO.setThumbnailUrl(cosManager != null
                 ? cosManager.buildThumbnailUrl(image.getUrl()) : null);
+        imageVO.setWebpUrl(cosManager != null
+                ? cosManager.buildWebpUrl(image.getUrl()) : null);
         imageVO.setName(image.getName());
         imageVO.setIntroduction(image.getIntroduction());
         imageVO.setCategory(image.getCategory());

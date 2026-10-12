@@ -54,6 +54,15 @@
             <artifactId>thumbnailator</artifactId>
             <version>0.4.20</version>
         </dependency>
+        <!-- WebP 编码器：JDK ImageIO 能读不能写 webp，格式转换必须引第三方实现。
+             sejda 版封装了 Google libwebp 的 JNI 绑定（jar 内带各平台 .dll/.so），
+             注册成 ImageIO 的 SPI 后 ImageIO.write(img, "webp", out) 直接可用。
+             ⚠️ 带 native 库 = 只在支持的平台（win/mac/linux x64+arm）能跑，移植性比纯 Java 差 -->
+        <dependency>
+            <groupId>org.sejda.imageio</groupId>
+            <artifactId>webp-imageio</artifactId>
+            <version>0.1.6</version>
+        </dependency>
 
         <dependency>
             <groupId>org.projectlombok</groupId>
