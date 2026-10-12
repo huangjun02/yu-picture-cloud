@@ -23,7 +23,9 @@ import org.springframework.test.web.servlet.MvcResult;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.Date;
+import java.util.List;
 import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -129,20 +131,32 @@ class ImageControllerTest {
         return prepareImage(userId, name, category, new String[]{"测试"}, ImageConstant.REVIEW_STATUS_PASS);
     }
 
-    /** 全参数版：显式指定审核状态（默认待审核 —— 上传入口的初始值） */
+    /** 全参数版：显式指定审核状态（默认待审核 —— 上传入口的初始值），不带颜色 */
     private long prepareImage(long userId, String name, String category, String[] tags, int reviewStatus) {
-        return prepareImage(userId, name, category, tags, reviewStatus, null);
+        return prepareImage(userId, name, category, tags, reviewStatus,
+                List.<ImageUtils.PaletteColor>of());
     }
 
-    /** 带主色的重载（颜色筛选用例用）：色系跟着主色一起写，与生产代码同一路径 */
+    /**
+     * 带颜色的重载（颜色筛选用例用）：入参是调色板各主色的色值（第一条即主色）。
+     *
+     * <p>与生产写入链路对齐：生产是「extractPalette → 主色取第一名 → paletteToJson 落库」，
+     * 这里也用同一个 {@code paletteToJson} —— 两边各自拼一遍 JSON 早晚会漂移。
+     * 占比均分（筛选只看色系，占比只影响展示，用例不必较真）。
+     */
     private long prepareImage(long userId, String name, String category, String[] tags,
-                              int reviewStatus, String picColor) {
-        return prepareImage(userId, name, category, tags, reviewStatus, picColor, null);
+                              int reviewStatus, String[] paletteColors) {
+        List<ImageUtils.PaletteColor> palette = new ArrayList<>();
+        for (String color : paletteColors) {
+            palette.add(new ImageUtils.PaletteColor(color, 100 / paletteColors.length,
+                    ImageUtils.classifyColorFamily(color)));
+        }
+        return prepareImage(userId, name, category, tags, reviewStatus, palette);
     }
 
-    /** 显式指定色系的重载（测「色系按主色归类」这条不变式时用不到，留作查错口子） */
+    /** 显式给调色板的重载（需要精确控制占比时用） */
     private long prepareImage(long userId, String name, String category, String[] tags,
-                              int reviewStatus, String picColor, String picColorFamily) {
+                              int reviewStatus, List<ImageUtils.PaletteColor> palette) {
         Image image = new Image();
         image.setUrl("https://test-bucket.cos.ap-shanghai.myqcloud.com/test/" + name + ".jpg");
         image.setName(name);
@@ -159,11 +173,10 @@ class ImageControllerTest {
         image.setPicWidth(800);
         image.setPicHeight(600);
         image.setPicScale(800.0 / 600.0);
-        image.setPicColor(picColor);
-        // 生产代码里色系是「提取主色后立刻归类」，测试造数据照抄这条链 —— 只 set picColor
-        // 不 set 色系的话，筛选（按色系匹配）永远查不到，会误判成功能坏了
-        image.setPicColorFamily(picColorFamily != null ? picColorFamily
-                : ImageUtils.classifyColorFamily(picColor));
+        // 生产代码：主色 = 调色板第一名，筛选入口是调色板。造数只 set 主色、不 set 调色板的话，
+        // 按颜色的用例永远查不到（症状酷似「功能坏了」，其实是造数漏了字段）
+        image.setPicColor(palette.isEmpty() ? null : palette.get(0).color());
+        image.setPicPalette(palette.isEmpty() ? null : ImageUtils.paletteToJson(palette));
         image.setPicFormat("jpg");
         image.setUserId(userId);
         image.setReviewStatus(reviewStatus);
@@ -869,7 +882,7 @@ class ImageControllerTest {
     // ==================== 六、按颜色搜索 ====================
 
     @Test
-    void colorFilterShouldMatchSameFamilyNotExactColorValue() throws Exception {
+    void colorFilterShouldMatchAnyPaletteColorNotJustTheMainOne() throws Exception {
         long ownerId = prepareUser("img_t_color1", "user");
         Cookie cookie = loginAndGetCookie("img_t_color1");
         // 差值法（同口径）：基数和增量都必须带同一个筛选条件 ——
@@ -877,23 +890,23 @@ class ImageControllerTest {
         long whiteBase = totalOf(cookie, "{\"picColor\":\"#FFFFFF\"}");
         long blueBase = totalOf(cookie, "{\"picColor\":\"#1677FF\"}");
 
-        // 关键回归：提取器产出的是「近似白」#FDF9FB（真实相册里大量这种值），
-        // 用户点色板标准色 #FFFFFF —— 精确比色值会一张都筛不出（这正是本功能最初的致命 bug），
-        // 按色系匹配才对得上「点白色筛出所有白图」的预期
-        prepareImage(ownerId, "近白图", "素材", new String[]{"测试"}, ImageConstant.REVIEW_STATUS_PASS, "#FDF9FB");
-        prepareImage(ownerId, "近蓝图", "素材", new String[]{"测试"}, ImageConstant.REVIEW_STATUS_PASS, "#338CFD");
+        // 关键回归：白底 + 蓝主体的壁纸（动漫壁纸的典型形态，主色是那片背景白）。
+        // 单主色方案下它只认「白」，点「蓝色」永远搜不到它 —— 而这恰恰是最该搜到的一类图
+        prepareImage(ownerId, "白底蓝主体", "素材", new String[]{"测试"},
+                ImageConstant.REVIEW_STATUS_PASS, new String[]{"#FDF9FB", "#338CFD"});
 
         assertEquals(1, totalOf(cookie, "{\"picColor\":\"#FFFFFF\"}") - whiteBase,
-                "点「白色」必须筛出主色是近似白的图（连续值→色系收敛）");
+                "点「白色」要能搜到主色是近似白的图（连续值 → 色系收敛）");
         assertEquals(1, totalOf(cookie, "{\"picColor\":\"#1677FF\"}") - blueBase,
-                "点「蓝色」必须筛出主色是近似蓝的图");
+                "点「蓝色」也要能搜到「白底蓝主体」的图 —— 匹配调色板里任意一条主色，这正是本次改动的目的");
     }
 
     @Test
     void colorFilterShouldBeCaseInsensitive() throws Exception {
         long ownerId = prepareUser("img_t_color2", "user");
         Cookie cookie = loginAndGetCookie("img_t_color2");
-        prepareImage(ownerId, "绿图", "素材", new String[]{"测试"}, ImageConstant.REVIEW_STATUS_PASS, "#2ECC71");
+        prepareImage(ownerId, "绿图", "素材", new String[]{"测试"},
+                ImageConstant.REVIEW_STATUS_PASS, new String[]{"#2ECC71"});
 
         // 前端色板可能传小写（#2ecc71），归类结果必须与大写一致
         assertEquals(totalOf(cookie, "{\"picColor\":\"#2ECC71\"}"),
@@ -926,7 +939,7 @@ class ImageControllerTest {
 
         long redBase = totalOf(cookie, "{\"picColor\":\"#E74C3C\"}");
         prepareImage(otherId, "别人的红色待审图", "素材", new String[]{"测试"},
-                ImageConstant.REVIEW_STATUS_PENDING, "#E74C3C");
+                ImageConstant.REVIEW_STATUS_PENDING, new String[]{"#E74C3C"});
 
         // 浏览视角（普通用户默认）只见已通过 —— 别人那张待审核的红图不该被算进来
         assertEquals(redBase, totalOf(cookie, "{\"picColor\":\"#E74C3C\"}"),

@@ -18,7 +18,7 @@ import java.util.List;
  * <p><b>为什么需要它：</b>
  * <ul>
  *   <li>颜色功能上线前传的图 {@code picColor} 是 NULL → 完全不能按颜色筛；</li>
- *   <li>色系（{@code picColorFamily}）是后加的列，已有主色的图需要归类回填；</li>
+ *   <li>调色板（{@code picPalette}）是后加的列，已有主色的图需要整列回填；</li>
  *   <li>提取算法修过一个量化位数的 bug（{@code >> 3} 少移了 2 位，桶 key 会撞），
  *       早期算出的主色值偏保守 —— 顺手重算一遍最省心。</li>
  * </ul>
@@ -28,10 +28,10 @@ import java.util.List;
  *
  * <p>⚠️ <b>不放在常规测试里跑</b>：它没有 @Transactional（要真落库），
  * 且会打网络（逐张拉 COS）。所以用环境变量开关守住，默认跳过 ——
- * `COLOR_FAMILY_BACKFILL=1` 时才执行。跑一次即可，之后可删。
+ * `PALETTE_BACKFILL=1` 时才执行。跑一次即可，之后可删。
  */
 @SpringBootTest
-class ColorFamilyBackfillTest {
+class PaletteBackfillTest {
 
     @Resource
     private ImageService imageService;
@@ -41,8 +41,8 @@ class ColorFamilyBackfillTest {
 
     @Test
     void backfillMainColorAndFamily() {
-        Assumptions.assumeTrue("1".equals(System.getenv("COLOR_FAMILY_BACKFILL")),
-                "一次性维护任务：设 COLOR_FAMILY_BACKFILL=1 才执行");
+        Assumptions.assumeTrue("1".equals(System.getenv("PALETTE_BACKFILL")),
+                "一次性维护任务：设 PALETTE_BACKFILL=1 才执行");
 
         List<Image> images = imageService.list(new QueryWrapper<Image>().orderByAsc("id"));
         int updated = 0;
@@ -58,20 +58,20 @@ class ColorFamilyBackfillTest {
             }
             try {
                 byte[] bytes = cosManager.download(key);
-                String color = ImageUtils.extractMainColor(bytes);
-                if (color == null) {
+                List<ImageUtils.PaletteColor> palette = ImageUtils.extractPalette(bytes);
+                if (palette.isEmpty()) {
                     System.out.println("[回填] 跳过（解码失败）: id=" + image.getId() + " name=" + image.getName());
                     skipped++;
                     continue;
                 }
                 Image update = new Image();
                 update.setId(image.getId());
-                update.setPicColor(color);
-                update.setPicColorFamily(ImageUtils.classifyColorFamily(color));
+                update.setPicColor(palette.get(0).color());
+                update.setPicPalette(ImageUtils.paletteToJson(palette));
                 imageService.updateById(update);
                 updated++;
-                System.out.printf("[回填] %s → picColor=%s family=%s（%s）%n",
-                        image.getId(), color, update.getPicColorFamily(), image.getName());
+                System.out.printf("[回填] %s → %s（%s）%n",
+                        image.getId(), update.getPicPalette(), image.getName());
             } catch (Exception e) {
                 System.out.println("[回填] 失败: id=" + image.getId() + " 原因=" + e.getMessage());
                 skipped++;
