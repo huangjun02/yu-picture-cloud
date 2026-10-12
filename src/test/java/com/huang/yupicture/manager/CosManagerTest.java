@@ -17,6 +17,7 @@ import java.net.http.HttpResponse;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -128,5 +129,37 @@ class CosManagerTest {
         } finally {
             cosManager.delete(key);
         }
+    }
+
+    /**
+     * 派生 URL 的推导规则（纯逻辑，不碰网络）：webp 源图必须给 null。
+     *
+     * <p>这条规则是「裂图」投诉换来的：前端主页直接拿 thumbnailUrl 当 img src，
+     * 而 webp 源图既没有缩略图也没有 webp 副本（两个生成器都对 webp 跳过），
+     * 推导出来的 xxx_thumb.webp 是不存在的地址 → 一屏裂图。
+     * VO 里对 null 的语义是「没有这个派生文件」，前端据此回退原图。
+     */
+    @Test
+    void derivedUrlsShouldBeNullForWebpSources() {
+        Assumptions.assumeTrue(cosManager != null, "未配置 COS 时跳过（该方法只用到推导规则，与配置无关）");
+
+        String base = "https://bucket.cos.ap-shanghai.myqcloud.com/public/abc";
+
+        // jpg / png 源图有派生文件 → 正常推导
+        assertEquals(base + "_thumb.jpg", cosManager.buildThumbnailUrl(base + ".jpg"));
+        assertEquals(base + "_webp.webp", cosManager.buildWebpUrl(base + ".jpg"));
+        assertEquals(base + "_thumb.png", cosManager.buildThumbnailUrl(base + ".png"));
+
+        // webp 源图：一个派生文件都没有 → null（不是 404 的地址）
+        assertNull(cosManager.buildThumbnailUrl(base + ".webp"),
+                "webp 源图没有缩略图，必须返回 null 让前端回退原图");
+        assertNull(cosManager.buildWebpUrl(base + ".webp"),
+                "webp 源图不会再生成 webp 副本，必须返回 null");
+
+        // 大小写与查询串：webp 判定不能只看小写后缀的裸字符串
+        assertNull(cosManager.buildThumbnailUrl(base + ".WEBP"), "后缀大小写不该影响判定");
+
+        // 空值不该炸（VO 拿去用 null 调过）
+        assertNull(cosManager.buildThumbnailUrl(null));
     }
 }
