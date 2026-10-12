@@ -43,6 +43,10 @@ public class SaTokenConfig implements WebMvcConfigurer {
             "/swagger-ui/**",
             "/swagger-resources/**",
             "/favicon.ico",
+            // 分享查看：短链免登录（游客凭码看已通过的图）。
+            // 只放行这一个"查看"接口；生成分享码（/image/share）仍要求登录 + 归属校验
+            // —— 别图省事写成 "/image/share/**"，那会把生成接口也敞开。
+            "/image/share/view",
             // Spring Boot 的错误转发路径，避免错误页自己被拦成 40100
             "/error"
     };

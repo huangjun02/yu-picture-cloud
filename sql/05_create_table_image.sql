@@ -33,7 +33,10 @@ CREATE TABLE IF NOT EXISTS `image`
     createTime   DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
     updateTime   DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
     isDelete     TINYINT       NOT NULL DEFAULT 0 COMMENT '是否删除：0-正常，1-已删除（逻辑删除）',
+    shareCode    VARCHAR(16)   NULL COMMENT '分享短链码（随机 Base62，未分享为 NULL）',
     PRIMARY KEY (id),
+    -- 分享短链：按码查图走它；同时防生成时撞码
+    UNIQUE KEY uk_shareCode (shareCode),
     -- 「我的图片」列表按 userId 过滤，必建
     KEY idx_userId (userId),
     -- 按名称搜索、按分类筛选

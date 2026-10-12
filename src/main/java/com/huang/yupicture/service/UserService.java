@@ -46,6 +46,16 @@ public interface UserService extends IService<User> {
     User getLoginUser();
 
     /**
+     * 静默取当前登录用户：<b>未登录返回 null，不抛异常</b>。
+     *
+     * <p>给「登录可选」的接口用（如分享查看：游客能看已通过的图，登录态存在时本人才看得到自己的全部）。
+     * 与 {@link #getLoginUser()} 的差别只有「未登录时抛不抛」——需要强制登录的接口一律用后者。
+     *
+     * @return 用户实体；未登录或登录态指向的用户已被删 → null
+     */
+    User getLoginUserOrNull();
+
+    /**
      * 退出登录：注销服务端会话。
      */
     void userLogout();

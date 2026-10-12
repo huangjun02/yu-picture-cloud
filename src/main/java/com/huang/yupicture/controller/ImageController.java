@@ -204,4 +204,28 @@ public class ImageController {
     public BaseResponse<Boolean> deleteImage(@RequestParam String id) {
         return ResultUtils.success(imageService.deleteImage(id));
     }
+
+    /**
+     * 生成分享短链（本人或管理员）。
+     *
+     * <p>只返回分享码；完整短链由前端拼（{@code origin + "/share/" + code}）——
+     * 链接格式天然属于前端的路由知识，放后端反而要多一份 base-url 配置。
+     */
+    @PostMapping("/share")
+    @Operation(summary = "生成分享短链（本人或管理员）")
+    public BaseResponse<String> shareImage(@RequestParam String id) {
+        return ResultUtils.success(imageService.shareImage(id));
+    }
+
+    /**
+     * 按分享码查看图片（<b>免登录</b> —— 已加入 SaTokenConfig 白名单）。
+     *
+     * <p>这是本模块第二个"仅登录可选"的入口：游客凭码看已通过的图；带登录态时本人/管理员
+     * 还能看自己未通过的图。
+     */
+    @PostMapping("/share/view")
+    @Operation(summary = "按分享码查看图片（免登录）")
+    public BaseResponse<ImageVO> getSharedImage(@RequestParam String shareCode) {
+        return ResultUtils.success(imageService.getSharedImage(shareCode));
+    }
 }

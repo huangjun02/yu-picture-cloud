@@ -29,10 +29,12 @@ import com.huang.yupicture.utils.UrlPictureUtils;
 import jakarta.annotation.Resource;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.io.IOException;
+import java.security.SecureRandom;
 import java.util.ArrayList;
 import java.util.Date;
 import java.util.List;
@@ -78,6 +80,19 @@ public class ImageServiceImpl extends ServiceImpl<ImageMapper, Image> implements
     /** 对外 HTTP 抓取（拉远程图片）：走共享客户端，代理/超时/重定向统一在这儿配 */
     @Resource
     private OutboundHttpClient outboundHttpClient;
+
+    /** 分享码字符表（Base62：字母大小写 + 数字） */
+    private static final char[] SHARE_CODE_ALPHABET =
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789".toCharArray();
+
+    /**
+     * 分享码的随机源用 SecureRandom 而不是 Random：
+     * 分享码是"持有即可查看"的凭证，可预测的随机数等于码可被枚举。
+     */
+    private static final SecureRandom SHARE_RANDOM = new SecureRandom();
+
+    /** 分享码生成失败重试上限（防极端情况下死循环） */
+    private static final int SHARE_CODE_MAX_RETRY = 5;
 
     @Override
     public ImageVO getImageById(String id) {
@@ -260,6 +275,76 @@ public class ImageServiceImpl extends ServiceImpl<ImageMapper, Image> implements
         }
         log.info("删除图片：id={}, 操作人id={}", imageId, loginUser.getId());
         return true;
+    }
+
+    @Override
+    public String shareImage(String id) {
+        User loginUser = userService.getLoginUser();
+        long imageId = ParamUtils.parseId(id);
+
+        Image image = this.getById(imageId);
+        if (image == null) {
+            throw new BusinessException(ErrorCode.NOT_FOUND_ERROR, "图片不存在");
+        }
+        checkImageOwner(image, loginUser);
+
+        // 幂等：已经分享过就复用原码（重复点「分享」不该产生一串不同链接）
+        if (!ParamUtils.isBlank(image.getShareCode())) {
+            return image.getShareCode();
+        }
+
+        // 生成唯一分享码。撞码概率极低，但唯一索引会挡住并发下的极端情况 →
+        // 抓到 DuplicateKeyException 就换一个码重试。
+        for (int i = 0; i < SHARE_CODE_MAX_RETRY; i++) {
+            String code = generateShareCode();
+            Image update = new Image();
+            update.setId(imageId);
+            update.setShareCode(code);
+            try {
+                if (this.updateById(update)) {
+                    log.info("生成分享短链：imageId={}, operatorId={}", imageId, loginUser.getId());
+                    return code;
+                }
+            } catch (DuplicateKeyException e) {
+                // 撞 uk_shareCode：换一个码重试（8 位 Base62 空间极大，实际几乎不会发生）
+                log.warn("分享码冲突，重试：code={}", code);
+            }
+        }
+        throw new BusinessException(ErrorCode.OPERATION_ERROR, "生成分享链接失败，请重试");
+    }
+
+    /** 生成一个随机分享码（Base62 × SHARE_CODE_LENGTH 位） */
+    private String generateShareCode() {
+        StringBuilder sb = new StringBuilder(ImageConstant.SHARE_CODE_LENGTH);
+        for (int i = 0; i < ImageConstant.SHARE_CODE_LENGTH; i++) {
+            sb.append(SHARE_CODE_ALPHABET[SHARE_RANDOM.nextInt(SHARE_CODE_ALPHABET.length)]);
+        }
+        return sb.toString();
+    }
+
+    @Override
+    public ImageVO getSharedImage(String shareCode) {
+        if (ParamUtils.isBlank(shareCode)) {
+            throw new BusinessException(ErrorCode.PARAMS_ERROR, "分享码不能为空");
+        }
+        // 按码查图：uk_shareCode 唯一命中，走索引。逻辑删除的图 MP 会自动补 isDelete=0 → 查不到 → 短链失效
+        Image image = this.getOne(new LambdaQueryWrapper<Image>().eq(Image::getShareCode, shareCode));
+        if (image == null) {
+            throw new BusinessException(ErrorCode.NOT_FOUND_ERROR, "分享的图片不存在或已失效");
+        }
+
+        // 可见性与 checkImageVisible 同一套语义，区别只是这里登录态可为空（游客）
+        User loginUser = userService.getLoginUserOrNull();
+        if (loginUser != null && (isAdmin(loginUser) || loginUser.getId().equals(image.getUserId()))) {
+            // 本人 / 管理员：任何状态都能看
+            return toImageVO(image);
+        }
+        // 其他人（含游客）：只能看已通过；未通过报「不存在」（连存在性都不暴露）
+        boolean passed = Integer.valueOf(ImageConstant.REVIEW_STATUS_PASS).equals(image.getReviewStatus());
+        if (!passed) {
+            throw new BusinessException(ErrorCode.NOT_FOUND_ERROR, "图片不存在");
+        }
+        return toImageVO(image);
     }
 
     @Override

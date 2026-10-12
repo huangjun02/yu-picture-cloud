@@ -121,5 +121,15 @@ public class Image implements Serializable {
     @TableLogic
     private Integer isDelete;
 
+    /**
+     * 分享短链码（随机 Base62 8 位；未分享为 null）。
+     *
+     * <p><b>为什么是随机码：</b>它是"凭码即可查看"的持有凭证 —— 用自增 / 时间戳这类
+     * 可预测的值，别人能枚举出未公开的图。用 {@link java.security.SecureRandom} 生成。
+     *
+     * <p>唯一性由数据库唯一索引 {@code uk_shareCode} 兜底（代码里的"先查再插"防不住并发）。
+     */
+    private String shareCode;
+
     private static final long serialVersionUID = 1L;
 }

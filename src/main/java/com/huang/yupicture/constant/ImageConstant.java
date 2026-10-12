@@ -26,6 +26,9 @@ public final class ImageConstant {
      */
     public static final String AUTO_REVIEW_MESSAGE = "管理员自动过审";
 
+    /** 分享短链码长度（随机 Base62 字符数）：62^8 ≈ 2.2e14，碰撞概率可忽略 */
+    public static final int SHARE_CODE_LENGTH = 8;
+
     private ImageConstant() {
     }
 }

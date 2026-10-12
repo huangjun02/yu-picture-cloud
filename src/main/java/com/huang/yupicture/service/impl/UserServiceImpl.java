@@ -72,17 +72,22 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
 
     @Override
     public User getLoginUser() {
-        // isLogin() 内部会从 cookie/header 里解析 token；没有或已过期都是 false
-        if (!StpUtil.isLogin()) {
-            throw new BusinessException(ErrorCode.NOT_LOGIN_ERROR);
-        }
-        long userId = StpUtil.getLoginIdAsLong();
-        User user = this.getById(userId);
+        User user = getLoginUserOrNull();
         if (user == null) {
-            // 极端情况：登录态还在，但用户已被删（逻辑删除也算）
             throw new BusinessException(ErrorCode.NOT_LOGIN_ERROR);
         }
         return user;
+    }
+
+    @Override
+    public User getLoginUserOrNull() {
+        // isLogin() 内部会从 cookie/header 里解析 token；没有或已过期都是 false
+        if (!StpUtil.isLogin()) {
+            return null;
+        }
+        long userId = StpUtil.getLoginIdAsLong();
+        // 极端情况：登录态还在，但用户已被删（逻辑删除也算）→ 按"未登录"处理
+        return this.getById(userId);
     }
 
     @Override

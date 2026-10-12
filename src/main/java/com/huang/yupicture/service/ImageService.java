@@ -106,6 +106,30 @@ public interface ImageService extends IService<Image> {
     boolean deleteImage(String id);
 
     /**
+     * 生成（或复用）图片的分享短链码 —— 本人或管理员。
+     *
+     * <p><b>幂等</b>：已分享过就直接返回原码，重复点「分享」不会产生一串不同链接。
+     *
+     * @param id 图片 id（字符串形式的雪花 id）
+     * @return 分享短链码（随机 Base62；前端用 {@code origin + "/share/" + code} 拼完整链接）
+     * @throws com.huang.yupicture.common.BusinessException 未登录（40100）／图片不存在（40400）／无权分享他人的图（40101）
+     */
+    String shareImage(String id);
+
+    /**
+     * 按分享码查看图片（<b>免登录</b>，已加入 SaTokenConfig 白名单）。
+     *
+     * <p>可见性与 {@code getImageById} 完全一致：已通过任何人可看；未通过只有本人/管理员可看，
+     * 其他人（含游客）报 40400「图片不存在」—— 连存在性都不暴露。
+     * 已逻辑删除的图查询不到 → 短链自然"失效"。
+     *
+     * @param shareCode 分享码
+     * @return 脱敏后的图片信息
+     * @throws com.huang.yupicture.common.BusinessException 分享码为空（40000）／图不存在或已失效（40400）
+     */
+    ImageVO getSharedImage(String shareCode);
+
+    /**
      * 上传图片（本人）。
      *
      * <p>校验顺序（任何一步不过都不消耗存储）：
