@@ -76,20 +76,24 @@ public class Image implements Serializable {
     /**
      * 主色调（{@code #RRGGBB}，大写；提取失败为 {@code null}）。
      *
-     * <p>按颜色搜索的检索维度。上传 / URL 传图时由 {@code ImageUtils.extractMainColor}
-     * 提取，等步长采样 + RGB 量化直方图。{@code null} = 这张图不参与颜色筛选
-     * （派生信息提取失败属正常降级，与缩略图 / WebP 同一条纪律），不是数据缺失。
+     * <p>按颜色搜索的检索维度，语义是「<b>调色板第一名</b>」（面积最大的颜色）。
+     * 上传 / URL 传图时由 {@code ImageUtils.extractPalette} 提取。
+     * {@code null} = 这张图不参与颜色筛选（派生信息提取失败属正常降级，
+     * 与缩略图 / WebP 同一条纪律），不是数据缺失。
      */
     private String picColor;
 
     /**
-     * 色系（white/black/red/orange/yellow/green/cyan/blue/purple/brown）。
+     * 调色板（JSON 数组字符串，形如
+     * {@code [{"color":"#FDF9FB","ratio":76,"family":"white"},…]}；提取失败为 {@code null}）。
      *
-     * <p>由 {@code picColor} 经 {@code ImageUtils.classifyColorFamily} 归类，筛选按它匹配：
-     * 主色是连续值（#FDF9FB「近似白」），色板是离散标准色（#FFFFFF），精确匹配永远对不上——
-     * 色系是把连续值收敛到离散类别的桥梁。picColor 为 NULL 时同为 NULL。
+     * <p>按颜色搜索的<b>筛选入口</b>。单主色只认面积最大的颜色，遇到「白底 + 彩色主体」
+     * （壁纸 / 商品图 / 截图）时主体色被背景盖住；调色板把背景 / 主体 / 点缀都收进来，
+     * 筛选条件随之变成「<b>任意一条落在该色系</b>」（SQL 侧用
+     * {@code JSON_CONTAINS(picPalette, '"blue"', '$[*].family')}）。
+     * 同时供详情页画色条（色值 + 占比），前端按 tags 那套「宽容解析」处理历史脏值。
      */
-    private String picColorFamily;
+    private String picPalette;
 
     /**
      * 感知哈希（pHash，64 位 → 16 位十六进制，小写；提取失败为 {@code null}）。

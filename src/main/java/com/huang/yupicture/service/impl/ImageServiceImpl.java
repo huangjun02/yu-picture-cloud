@@ -145,7 +145,7 @@ public class ImageServiceImpl extends ServiceImpl<ImageMapper, Image> implements
         if (!ParamUtils.isBlank(imageQueryRequest.getPicFormat())) {
             wrapper.eq(Image::getPicFormat, imageQueryRequest.getPicFormat());
         }
-        // 主色调筛选：入参是色板标准色 → 归类成色系 → 按 picColorFamily 等值匹配
+        // 颜色筛选：入参是色板标准色 → 归类成色系 → 命中调色板里任意一条主色
         // （分流收在 applyColorFilter，与 applyTagsFilter 同一写法）
         if (!ParamUtils.isBlank(imageQueryRequest.getPicColor())) {
             applyColorFilter(wrapper, imageQueryRequest.getPicColor());
@@ -583,18 +583,16 @@ public class ImageServiceImpl extends ServiceImpl<ImageMapper, Image> implements
             image.setPicHeight(size[1]);
             image.setPicScale((double) size[0] / size[1]);
         }
-        // ========== 主色调（按颜色搜索的检索维度） ==========
-        // 与缩略图 / WebP 同一条纪律：提取失败返回 null 只记日志降级，绝不阻断上传。
+        // ========== 调色板（按颜色搜索的检索维度） ==========
+        // 与缩略图 / WebP 同一条纪律：提取失败（空列表）只记日志降级，绝不阻断上传。
         // null 的语义是「这张图不参与颜色筛选」，存量图（本功能之前传的）同样是 null —— 一致。
-        String mainColor = ImageUtils.extractMainColor(bytes);
-        if (mainColor != null) {
-            image.setPicColor(mainColor);
-            // 色系（筛选入口）跟着主色一起写：主色是连续值（#FDF9FB），色板是离散标准色
-            // （#FFFFFF），筛选必须按色系等值匹配才对得上「点白色筛出所有白图」的预期。
-            // 两者在同一个代码路径里一次算出，不存在「先写了主色、忘了写色系」的窗口。
-            image.setPicColorFamily(ImageUtils.classifyColorFamily(mainColor));
+        // 主色 + 调色板一次算完：主色是「调色板第一名」的别名，分两处算早晚对不上。
+        List<ImageUtils.PaletteColor> palette = ImageUtils.extractPalette(bytes);
+        if (!palette.isEmpty()) {
+            image.setPicColor(palette.get(0).color());
+            image.setPicPalette(ImageUtils.paletteToJson(palette));
         } else {
-            log.warn("主色提取失败，该图不参与颜色筛选：name={}", imageName);
+            log.warn("调色板提取失败，该图不参与颜色筛选：name={}", imageName);
         }
         // ========== 感知哈希（以图搜图的检索维度） ==========
         // 与主色 / 缩略图 / WebP 同一条纪律：算不出就 null 降级，绝不阻断上传。
@@ -788,6 +786,7 @@ public class ImageServiceImpl extends ServiceImpl<ImageMapper, Image> implements
         imageVO.setPicHeight(image.getPicHeight());
         imageVO.setPicScale(image.getPicScale());
         imageVO.setPicColor(image.getPicColor());
+        imageVO.setPicPalette(image.getPicPalette());
         imageVO.setPicFormat(image.getPicFormat());
         imageVO.setUserId(String.valueOf(image.getUserId()));
         imageVO.setCreateTime(image.getCreateTime());
@@ -1013,12 +1012,26 @@ public class ImageServiceImpl extends ServiceImpl<ImageMapper, Image> implements
     }
 
     /**
-     * 颜色筛选：入参是色板标准色，归类成色系后按 {@code picColorFamily} 等值匹配。
+     * 颜色筛选：入参是色板标准色，归类成色系后匹配 {@code picPalette} 里<b>任意一条</b>主色。
      *
-     * <p><b>为什么不直接比色值：</b>主色是连续空间里的具体值（#FDF9FB「近似白」），
+     * <p><b>为什么不直接比色值：</b>提取出来的是连续空间里的具体值（#FDF9FB「近似白」），
      * 色板是离散标准色（#FFFFFF）——等值比较两个空间几乎永远对不上，用户点「白色」
-     * 一张都筛不出来。色系是把连续值收敛到离散类别的桥：每张图恰好属于一个色系，
-     * 点任何色块都有确定结果（不会出现「点了却什么都没有」）。
+     * 一张都筛不出来。色系是把连续值收敛到离散类别的桥。
+     *
+     * <p><b>为什么是「任一条」而不是「主色那一条」：</b>主色只认面积最大的颜色，
+     * 白底 + 彩色主体的图（壁纸 / 商品图 / 截图）主色永远是背景白，点「蓝色」搜不到它 ——
+     * 而这正是最该搜到的一类图。改按调色板里任一条主色的色系匹配后，
+     * 「背景是白、主体是蓝」的图在白色和蓝色下都能被搜到（同一个色系也不会重复计数，
+     * 因为条件是行级的 EXISTS 语义而不是 JOIN）。
+     *
+     * <p>SQL 用 {@code JSON_CONTAINS(JSON_EXTRACT(picPalette, '$[*].family'), '"blue"')}：色系是在写入侧
+     * 算好存进 JSON 的（数据库里没有 classifyColorFamily 这个函数）。用不到索引，
+     * 但这一列只有 1~3 个元素、筛选又总是伴随分页，代价可忽略；
+     * 换来的是不必再维护一个「色系列」（二期那个单值列已随本次改动删除）。
+     *
+     * <p>⚠️ 必须先 JSON_EXTRACT 再 JSON_CONTAINS（两个函数的 path 能力不同）——
+     * JSON_CONTAINS 的 path 参数不允许通配符，把 {@code '$[*].family'} 直接当它的第三参
+     * 会抛 SQLSyntaxErrorException 包成 50000。JSON_EXTRACT 的 path 才支持 {@code $[*]}。
      *
      * <p>格式不对报 40000 而不是静默忽略：用户明确选了颜色却搜出全部图，
      * 等于筛选失效还不报错（与标签数组的处理同一立场）。
@@ -1028,7 +1041,12 @@ public class ImageServiceImpl extends ServiceImpl<ImageMapper, Image> implements
         if (family == null) {
             throw new BusinessException(ErrorCode.PARAMS_ERROR, "颜色格式不正确，应为 #RRGGBB");
         }
-        wrapper.eq(Image::getPicColorFamily, family);
+        // 传的是 JSON 字符串字面量（含双引号）：JSON_CONTAINS 的 candidate 必须本身是合法 JSON。
+        // ⚠️ 不能写成 JSON_CONTAINS(picPalette, {0}, '$[*].family')：MySQL 的 JSON_CONTAINS
+        // 第三个参数（path）**不允许通配符/数组区间**，会直接抛 SQLSyntaxErrorException
+        // （"path expressions may not contain the * and ** tokens"）→ 被全局异常处理器包成 50000。
+        // 正确姿势：先用 JSON_EXTRACT（它的 path 支持通配符）抽出 family 数组，再对结果做 JSON_CONTAINS。
+        wrapper.apply("JSON_CONTAINS(JSON_EXTRACT(picPalette, '$[*].family'), {0})", "\"" + family + "\"");
     }
 
     private void applyTagsFilter(LambdaQueryWrapper<Image> wrapper, String tags) {

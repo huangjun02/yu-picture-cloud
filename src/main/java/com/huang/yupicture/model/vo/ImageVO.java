@@ -83,8 +83,16 @@ public class ImageVO implements Serializable {
     /** 宽高比（宽 / 高），前端用它预留位置防布局抖动 */
     private Double picScale;
 
-    /** 主色调（#RRGGBB，大写；提取失败为 null —— 该图不参与颜色筛选） */
+    /** 主色调（#RRGGBB，大写；= 调色板第一名。提取失败为 null —— 该图不参与颜色筛选） */
     private String picColor;
+
+    /**
+     * 调色板（JSON 数组字符串，形如 {@code [{"color":"#FDF9FB","ratio":76,"family":"white"}]}）。
+     *
+     * <p>详情页画色条用（色值 + 占比）。前端按 tags 那套宽容解析：解析不了就当没有，
+     * 不能因为一个派生字段把整页渲染搞崩。提取失败为 null。
+     */
+    private String picPalette;
 
     /** 格式：jpg / png / webp */
     private String picFormat;

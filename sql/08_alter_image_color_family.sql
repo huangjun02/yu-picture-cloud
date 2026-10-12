@@ -18,7 +18,7 @@ ALTER TABLE `image`
     ADD KEY idx_picColorFamily (picColorFamily);
 
 -- 回填存量图（含「上线前没主色的图」）：用一次性维护任务
--- src/test/java/com/huang/yupicture/tmp/ColorFamilyBackfillTest.java
--- 跑法：COLOR_FAMILY_BACKFILL=1 mvn -Dtest=ColorFamilyBackfillTest test
+-- src/test/java/com/huang/yupicture/tmp/PaletteBackfillTest.java
+-- 跑法：PALETTE_BACKFILL=1 mvn -Dtest=PaletteBackfillTest test
 -- 它拉 COS 原图重算主色 + 归类后 UPDATE 两列（MySQL 没有现成 HSV 函数，
 -- 归类只能由 Java 做完再回写）。
