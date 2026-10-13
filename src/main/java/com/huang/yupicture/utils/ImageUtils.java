@@ -7,6 +7,8 @@ import org.springframework.web.multipart.MultipartFile;
 
 import javax.imageio.ImageIO;
 import java.awt.image.BufferedImage;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -637,6 +639,39 @@ public final class ImageUtils {
             distance += Integer.bitCount(a ^ b);
         }
         return distance;
+    }
+
+    /**
+     * 计算字节内容的 MD5 指纹（32 位小写十六进制）—— 秒传的精确去重键。
+     *
+     * <p><b>与 {@link #perceptualHash(byte[])} 的分工（两个字段各管一摊，别混）：</b>
+     * MD5 是字节级精确指纹，内容差一个字节结果就完全不同 —— 管「秒传去重」；
+     * pHash 是感知哈希，同图不同编码哈希接近 —— 管「以图搜图」。
+     * 验证点：改一个像素的图不命中秒传（MD5 不同），但相似搜索能搜到（pHash 生效）。
+     *
+     * <p>零新依赖：JDK {@link MessageDigest} 现成，为一个摘要引 commons-codec 不划算。
+     * 单向 hash 与 perceptualHash 一样是像素/字节内容的统计量，落库而非 URL 推导。
+     *
+     * @param bytes 图片内容（压缩后的最终落库内容）
+     * @return 32 位小写十六进制；{@code null} 输入返回 {@code null}（与 perceptualHash
+     *         「算不出就降级」同一纪律，MD5 对任意字节（含空数组）都可计算，不会失败）
+     */
+    public static String md5(byte[] bytes) {
+        if (bytes == null) {
+            return null;
+        }
+        try {
+            byte[] digest = MessageDigest.getInstance("MD5").digest(bytes);
+            StringBuilder sb = new StringBuilder(32);
+            for (byte b : digest) {
+                sb.append(Character.forDigit((b >> 4) & 0xF, 16));
+                sb.append(Character.forDigit(b & 0xF, 16));
+            }
+            return sb.toString();
+        } catch (NoSuchAlgorithmException e) {
+            // MD5 是 JDK 必带的算法，这是防御性兜底 —— 但不能让「理论上不可能」变成 50000
+            throw new IllegalStateException("JDK 缺少 MD5 算法", e);
+        }
     }
 
     /**

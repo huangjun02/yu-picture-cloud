@@ -107,6 +107,20 @@ public class Image implements Serializable {
      */
     private String picHash;
 
+    /**
+     * 内容 MD5 指纹（32 位小写十六进制；秒传功能上线前的存量图为 {@code null}）。
+     *
+     * <p><b>秒传的精确去重键</b>，对「压缩后最终落库的内容」计算 —— 同一份字节必然
+     * 压缩出同一结果，指纹也必然相同；改一个像素 MD5 就完全不同（这正是与
+     * {@link #picHash 感知哈希} 的分工：MD5 管精确去重，pHash 管相似搜索）。
+     *
+     * <p>普通索引 {@code idx_md5}：秒传查询走索引等值命中。刻意<b>不是唯一索引</b> ——
+     * 归属语义是「B 传 A 已有图 → 新记录挂 B 名下、复用 COS 对象」，同指纹多条记录
+     * 是模型的一部分，唯一索引会直接禁止它。并发查-插竞态的最坏结果只是多传一份存储，
+     * 无错误无丢数据。
+     */
+    private String md5;
+
     /** 格式：jpg / png / webp ... */
     private String picFormat;
 

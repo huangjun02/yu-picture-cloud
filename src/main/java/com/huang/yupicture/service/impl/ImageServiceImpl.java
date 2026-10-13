@@ -12,11 +12,15 @@ import com.huang.yupicture.constant.UserConstant;
 import com.huang.yupicture.manager.CosManager;
 import com.huang.yupicture.manager.OutboundHttpClient;
 import com.huang.yupicture.mapper.ImageMapper;
+import com.huang.yupicture.model.dto.image.ImageBatchDeleteRequest;
+import com.huang.yupicture.model.dto.image.ImageBatchReviewRequest;
+import com.huang.yupicture.model.dto.image.ImageBatchUpdateRequest;
 import com.huang.yupicture.model.dto.image.ImageDownloadResult;
 import com.huang.yupicture.model.dto.image.ImageQueryRequest;
 import com.huang.yupicture.model.dto.image.ImageUpdateRequest;
 import com.huang.yupicture.model.entity.Image;
 import com.huang.yupicture.model.entity.User;
+import com.huang.yupicture.model.vo.ImageBatchResultVO;
 import com.huang.yupicture.model.vo.ImageOptionsVO;
 import com.huang.yupicture.model.vo.ImageVO;
 import com.huang.yupicture.service.ImageService;
@@ -223,6 +227,163 @@ public class ImageServiceImpl extends ServiceImpl<ImageMapper, Image> implements
         return true;
     }
 
+    // ==================== 批量操作（部分成功语义） ====================
+
+    /**
+     * 批量入参的通用校验：非空、去重、数量上限。
+     *
+     * <p>去重放在校验里而不是留给调用方：同一个 id 传两遍是前端表格勾选逻辑的 bug，
+     * 但宽容地当成「去重后处理」比让用户看到莫名其妙的失败明细更好 ——
+     * 而且不去重的话，批量删除会二次调用单删（第二次报「不存在」算 fail），计数直接错。
+     *
+     * @return 去重后的 id 列表（保持原顺序）
+     */
+    private List<String> validateBatchIds(List<String> imageIds, String action) {
+        if (imageIds == null || imageIds.isEmpty()) {
+            throw new BusinessException(ErrorCode.PARAMS_ERROR, "请先选择要" + action + "的图片");
+        }
+        if (imageIds.size() > BATCH_MAX_SIZE) {
+            throw new BusinessException(ErrorCode.PARAMS_ERROR,
+                    "单次最多操作 " + BATCH_MAX_SIZE + " 张图片（当前 " + imageIds.size() + " 张）");
+        }
+        return imageIds.stream().distinct().toList();
+    }
+
+    /**
+     * 逐条执行 + 部分成功计数：单条动作抛任何 BusinessException 都算这一条 fail，
+     * 不中断整批，原因带回给前端。
+     *
+     * <p>有意不开 @Transactional：批量删除要清 COS 文件，那是无法回滚的物理动作；
+     * 而且逐条自治意味着一条失败不影响已成功的条目，这正是用户直觉里的「部分成功」。
+     */
+    private ImageBatchResultVO runBatch(List<String> imageIds, java.util.function.Consumer<String> action) {
+        ImageBatchResultVO result = new ImageBatchResultVO();
+        for (String rawId : imageIds) {
+            try {
+                action.accept(rawId);
+                result.setSuccessCount(result.getSuccessCount() + 1);
+            } catch (BusinessException e) {
+                result.setFailCount(result.getFailCount() + 1);
+                result.getFailures().add(new ImageBatchResultVO.FailItem(rawId, e.getMessage()));
+            }
+        }
+        log.info("批量操作完成：total={}, success={}, fail={}",
+                imageIds.size(), result.getSuccessCount(), result.getFailCount());
+        return result;
+    }
+
+    @Override
+    public ImageBatchResultVO batchDeleteImages(ImageBatchDeleteRequest request) {
+        if (request == null) {
+            throw new BusinessException(ErrorCode.PARAMS_ERROR);
+        }
+        // getLoginUser() 顺带做了登录校验：批量接口同样不能匿名调
+        userService.getLoginUser();
+        List<String> ids = validateBatchIds(request.getImageIds(), "删除");
+        // 直接复用单条删除：归属校验 / COS 清理顺序 / 派生文件尽力清理，与单删完全一致
+        return runBatch(ids, this::deleteImage);
+    }
+
+    @Override
+    public ImageBatchResultVO batchUpdateImages(ImageBatchUpdateRequest request) {
+        if (request == null) {
+            throw new BusinessException(ErrorCode.PARAMS_ERROR);
+        }
+        User loginUser = userService.getLoginUser();
+
+        // category 与 appendTags 都没传 = 没有内容的编辑，只可能是个 bug → 明确拒绝
+        boolean hasCategory = !ParamUtils.isBlank(request.getCategory());
+        boolean hasTags = request.getAppendTags() != null && !request.getAppendTags().isEmpty();
+        if (!hasCategory && !hasTags) {
+            throw new BusinessException(ErrorCode.PARAMS_ERROR, "请填写要修改的分类或要追加的标签");
+        }
+        // 追加的标签先做格式校验：空白标签是「明确传了坏值」，报错而不是静默丢弃
+        // （与编辑接口「解析不了报 40000 不静默吞」同一立场）
+        if (hasTags) {
+            for (String tag : request.getAppendTags()) {
+                if (tag == null || tag.trim().isEmpty()) {
+                    throw new BusinessException(ErrorCode.PARAMS_ERROR, "追加的标签不能为空");
+                }
+            }
+        }
+
+        List<String> ids = validateBatchIds(request.getImageIds(), "编辑");
+        String category = hasCategory ? request.getCategory().trim() : null;
+        List<String> appendTags = hasTags
+                ? request.getAppendTags().stream().map(String::trim).distinct().toList()
+                : null;
+
+        return runBatch(ids, rawId -> {
+            long imageId = ParamUtils.parseId(rawId);
+            Image oldImage = this.getById(imageId);
+            if (oldImage == null) {
+                throw new BusinessException(ErrorCode.NOT_FOUND_ERROR, "图片不存在");
+            }
+            checkImageOwner(oldImage, loginUser);
+
+            // 追加语义：读现有标签（宽容解析，容忍历史脏值）→ 并入 → 去重 → 规范化落库。
+            // 用 parseTagsLenient 而不是严格解析：批量场景下一条历史脏标签不该卡死整批，
+            // 宽松解析后写回规范格式，还顺带把这条脏数据洗掉了
+            List<String> mergedTags = null;
+            if (appendTags != null) {
+                mergedTags = new ArrayList<>(parseTagsLenient(oldImage.getTags()));
+                for (String tag : appendTags) {
+                    if (!mergedTags.contains(tag)) {
+                        mergedTags.add(tag);
+                    }
+                }
+            }
+
+            // 复用单条编辑的写入模式：新空对象 + 显式 set（PATCH 语义），
+            // name / introduction / url / userId 一概不碰
+            Image image = new Image();
+            image.setId(imageId);
+            image.setCategory(category);
+            image.setTags(mergedTags == null ? null : toTagsJson(mergedTags));
+
+            // 编辑触发审核重置：与单条编辑同一套规则（管理员改 → 自动过审；用户改 → 退回待审核）。
+            // 字段补齐逻辑与单条一致 —— 内容变了，审核结论就可能过期，批量编辑不例外
+            if (isAdmin(loginUser)) {
+                image.setReviewStatus(ImageConstant.REVIEW_STATUS_PASS);
+                image.setReviewerId(oldImage.getUserId());
+                image.setReviewTime(new Date());
+                image.setReviewMessage(ImageConstant.AUTO_REVIEW_MESSAGE);
+            } else {
+                image.setReviewStatus(ImageConstant.REVIEW_STATUS_PENDING);
+            }
+
+            if (!this.updateById(image)) {
+                throw new BusinessException(ErrorCode.OPERATION_ERROR, "更新失败");
+            }
+        });
+    }
+
+    @Override
+    public ImageBatchResultVO batchReviewImages(ImageBatchReviewRequest request) {
+        if (request == null) {
+            throw new BusinessException(ErrorCode.PARAMS_ERROR);
+        }
+        userService.checkAdminUser();
+        List<String> ids = validateBatchIds(request.getImageIds(), "审核");
+
+        // 「拒绝必填原因」在进循环之前整批校验：这是纯入参问题，逐条执行只会白跑一趟，
+        // 而且审了一半才发现原因没填，「部分成功」里成功的那几条反而是用户不想要的
+        if (request.getReviewStatus() == null
+                || (request.getReviewStatus() != ImageConstant.REVIEW_STATUS_PASS
+                && request.getReviewStatus() != ImageConstant.REVIEW_STATUS_REJECT)) {
+            throw new BusinessException(ErrorCode.PARAMS_ERROR, "审核状态只能是 通过/拒绝");
+        }
+        boolean reset = request.getResetReviewParams() == null || request.getResetReviewParams();
+        if (reset && request.getReviewStatus() == ImageConstant.REVIEW_STATUS_REJECT
+                && ParamUtils.isBlank(request.getReviewMessage())) {
+            throw new BusinessException(ErrorCode.PARAMS_ERROR, "拒绝时必须填写原因");
+        }
+
+        // 直接复用单条审核：状态机 / 重置开关 / 审核参数补齐一字不差
+        return runBatch(ids, rawId -> reviewImage(rawId, request.getReviewStatus(),
+                request.getReviewMessage(), request.getResetReviewParams()));
+    }
+
     @Override
     public boolean deleteImage(String id) {
         User loginUser = userService.getLoginUser();
@@ -234,12 +395,31 @@ public class ImageServiceImpl extends ServiceImpl<ImageMapper, Image> implements
         }
         checkImageOwner(image, loginUser);
 
+        // ========== 秒传引用计数：这条记录的 COS 对象可能被其他记录共享 ==========
+        // 秒传命中会新建记录复用同一个 URL —— 删一条记录前必须确认没有别人还在引用，
+        // 否则就是「B 的图裂了」（B 的记录好好的，指向的文件没了）。
+        // 注意口径：isDelete=0 的其他记录才算引用 —— 都删光时文件就该删了。
+        boolean sharedObject = false;
+        if (image.getMd5() != null) {
+            Long aliveRef = this.getBaseMapper().selectCount(new LambdaQueryWrapper<Image>()
+                    .eq(Image::getMd5, image.getMd5())
+                    .ne(Image::getId, imageId));
+            sharedObject = aliveRef != null && aliveRef > 0;
+            if (sharedObject) {
+                log.info("秒传共享对象，跳过文件清理（仍有 {} 条引用）：imageId={}, md5={}",
+                        aliveRef, imageId, image.getMd5());
+            }
+        }
+
         // ⚠️ 顺序：先删存储上的文件，再删数据库记录。理由——
         //   第二步失败：记录还在、文件没了 → 用户看得见"图裂了"，再点一次删除即可自愈
         //   顺序反过来：记录没了、文件还在 → 谁都不会发现，白占容量还一直计费
         //   原则：宁可留下"能被看见的错误"，也不留下"不会被发现的错误"。
         if (cosManager == null) {
             log.warn("对象存储未配置，跳过文件清理（只删数据库记录）：imageId={}", imageId);
+        } else if (sharedObject) {
+            // 秒传共享对象：跳过全部文件清理（原图 + 缩略图 + webp 都是确定性派生，
+            // 引用方还需要它们）。记录照删 —— 剩下的引用计数少了一，由其他记录继续持有。
         } else {
             String key = null;
             try {
@@ -383,6 +563,21 @@ public class ImageServiceImpl extends ServiceImpl<ImageMapper, Image> implements
                     100 - bytes.length * 100 / originalSize);
         }
 
+        // ========== 阶段一点八：秒传查重（压缩之后、汇合点之前） ==========
+        // 为什么放在压缩后：去重键是「压缩后最终落库的内容」的 MD5 —— 同一份原图两次上传
+        // 压缩结果一致 → 指纹一致，语义干净；放压缩前会因原图字节差异漏判（同一张图
+        // HTTP 传输位级一致，但 URL 传图远端字节与本地未必同源），放 COS 上传后又省不了存储。
+        // 命中语义（归属方案 b）：新建记录挂本人名下、复用已有 COS 对象 —— 存储省了、
+        // 归属清晰（直接返回 A 的记录会让 B「看到」A 的图，有越权嫌疑）。
+        // 派生文件零额外处理：缩略图 / WebP 的 key 是原图 key 的确定性函数，复用 key 即复用派生文件。
+        String md5 = ImageUtils.md5(bytes);
+        if (md5 != null) {
+            Image instantHit = this.getOne(new LambdaQueryWrapper<Image>().eq(Image::getMd5, md5));
+            if (instantHit != null) {
+                return persistInstantHit(loginUser, instantHit, resolveImageName(name, file.getOriginalFilename()), md5);
+            }
+        }
+
         String imageName = resolveImageName(name, file.getOriginalFilename());
         if (imageName.length() > 256) {
             throw new BusinessException(ErrorCode.PARAMS_ERROR, "图片名称不能超过 256 个字符");
@@ -460,8 +655,85 @@ public class ImageServiceImpl extends ServiceImpl<ImageMapper, Image> implements
         // 魔数复核：远端自称 jpg 实际是别的格式 → 拒绝（与文件上传同一条铁律）
         ImageUtils.checkContent(bytes, suffix);
 
+        // 秒传查重（与文件上传同一套逻辑，抽私有方法共用 —— URL 传的图也可能是别人已传过的）
+        String md5 = ImageUtils.md5(compressForFingerprint(bytes, suffix));
+        if (md5 != null) {
+            Image instantHit = this.getOne(new LambdaQueryWrapper<Image>().eq(Image::getMd5, md5));
+            if (instantHit != null) {
+                return persistInstantHit(loginUser, instantHit, resolveImageName(name, extractFileNameFromUrl(uri)), md5);
+            }
+        }
+
         String imageName = resolveImageName(name, extractFileNameFromUrl(uri));
         return persistProcessedImage(loginUser, bytes, suffix, imageName, null);
+    }
+
+    /**
+     * 秒传命中后的落库：新建记录挂本人名下，复用已有 COS 对象（归属方案 b）。
+     *
+     * <p>为什么要新记录而不是直接返回命中记录：URL 是 A 的图，B 的「我的图片」里
+     * 必须能看到自己传的这张 —— 记录归属即查看权。共享的是存储对象，不是记录。
+     *
+     * <p>审核流与正常上传一致：管理员直接过审，普通用户进待审核 ——
+     * 秒传只是省存储，不该绕过内容审核（同内容在 A 名下过审不代表在 B 名下免审）。
+     *
+     * <p>并发竞态（普通索引下没有唯一约束兜底）：两个请求同时过了「先查后插」，
+     * 各传一份存储、各落一条记录 —— 无错误无丢数据，只是极端并发下少省一次存储，
+     * 可接受（归属多记录模型下这是唯一正确的取舍，见 {@link Image#getMd5}）。
+     *
+     * <p>⚠️ 落库失败绝不能删 COS 对象：那是命中源记录还在引用的文件，
+     * 删了就是「A 的图裂了」—— 与 {@link #persistProcessedImage} 的回滚语义相反。
+     */
+    private ImageVO persistInstantHit(User loginUser, Image hit, String imageName, String md5) {
+        Image image = new Image();
+        image.setUrl(hit.getUrl());
+        image.setName(imageName);
+        image.setPicSize(hit.getPicSize());
+        image.setPicWidth(hit.getPicWidth());
+        image.setPicHeight(hit.getPicHeight());
+        image.setPicScale(hit.getPicScale());
+        image.setPicFormat(hit.getPicFormat());
+        image.setPicColor(hit.getPicColor());
+        image.setPicPalette(hit.getPicPalette());
+        image.setPicHash(hit.getPicHash());
+        image.setMd5(md5);
+        image.setUserId(loginUser.getId());
+        image.setCreateTime(new Date());
+        if (isAdmin(loginUser)) {
+            image.setReviewStatus(ImageConstant.REVIEW_STATUS_PASS);
+            image.setReviewerId(loginUser.getId());
+            image.setReviewTime(new Date());
+            image.setReviewMessage(ImageConstant.AUTO_REVIEW_MESSAGE);
+        } else {
+            image.setReviewStatus(ImageConstant.REVIEW_STATUS_PENDING);
+        }
+
+        // 落库失败不抛也不删存储（对象是共享的，删了害命中源）：直接报错让用户重试，
+        // 重试时这条已落库的记录会成为新的命中源，自愈。
+        boolean saved = this.save(image);
+        if (!saved) {
+            log.error("秒传记录落库失败：userId={}, md5={}, sourceUrl={}",
+                    loginUser.getId(), md5, hit.getUrl());
+            throw new BusinessException(ErrorCode.OPERATION_ERROR, "上传失败，请重试");
+        }
+
+        log.info("秒传命中：imageId={}, sourceUrl={}, userId={}, md5={}",
+                image.getId(), hit.getUrl(), loginUser.getId(), md5);
+        return toImageVO(image);
+    }
+
+    /**
+     * 「压缩一遍用于算指纹」—— URL 传图入口的秒传查重用。
+     *
+     * <p>文件上传入口的指纹算在 {@code uploadImage} 里（压缩后、汇合点前）；
+     * URL 传图入口没有提前压缩（压缩在汇合点里做），所以要在这里复刻一遍压缩
+     * 才能对齐「压缩后内容」这个指纹口径 —— 两个入口对同一张图必须算出同一个 md5，
+     * 否则「URL 传的图」永远命中不了「文件传的同图」。
+     *
+     * <p>抽出来的判据（老规矩，第二处出现时立刻抽）：压缩判重这件事出现在了第二个入口。
+     */
+    private byte[] compressForFingerprint(byte[] bytes, String suffix) {
+        return ImageUtils.compress(bytes, suffix);
     }
 
     /**
@@ -603,6 +875,16 @@ public class ImageServiceImpl extends ServiceImpl<ImageMapper, Image> implements
             image.setPicHash(picHash);
         } else {
             log.warn("感知哈希计算失败，该图不参与以图搜图：name={}", imageName);
+        }
+        // ========== MD5 指纹（秒传的去重键，本记录将成为未来秒传的命中源） ==========
+        // 上传入口算过的指纹随参数传进来？不 —— 直接重算一次的代价（一次 MD5，毫秒级）
+        // 远低于给私有方法加一个「只为了这一个调用点」的参数。失败返回 null 降级：
+        // 这张图自己不参与秒传命中，但上传本身照常成功（与 pHash 同一条纪律）。
+        String md5 = ImageUtils.md5(bytes);
+        if (md5 != null) {
+            image.setMd5(md5);
+        } else {
+            log.warn("MD5 指纹计算失败，该图不参与秒传：name={}", imageName);
         }
         image.setUserId(loginUser.getId());
         // ========== 审核状态的初始值：按「谁传的」分流（官方流程） ==========

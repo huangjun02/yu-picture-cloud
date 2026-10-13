@@ -25,8 +25,9 @@ CREATE TABLE IF NOT EXISTS `image`
     picHeight    INT           NULL COMMENT '高度（px）',
     picScale     DOUBLE        NULL COMMENT '宽高比（宽 / 高），列表页按比例预留位置、防抖动',
     picFormat    VARCHAR(32)   NULL COMMENT '格式：jpg / png / webp ...',
-    -- 与 sql/07 / 08 / 10 三条迁移同步（picColor 主色、picColorFamily 色系、picHash 感知哈希）
+    -- 与 sql/07 / 08 / 10 / 12 四条迁移同步（picColor 主色、picColorFamily 色系、picHash 感知哈希、md5 秒传指纹）
     picHash      CHAR(16)      NULL COMMENT '感知哈希（64 位十六进制，小写；以图搜图用）',
+    md5          CHAR(32)      NULL COMMENT '内容 MD5 指纹（32 位小写十六进制，秒传去重键）',
     reviewStatus  TINYINT      NOT NULL DEFAULT 0 COMMENT '审核状态：0-待审核，1-通过，2-拒绝',
     reviewMessage VARCHAR(512)  NULL COMMENT '审核意见（拒绝时必填原因）',
     reviewerId    BIGINT       NULL COMMENT '审核人 id（管理员）',
@@ -39,6 +40,8 @@ CREATE TABLE IF NOT EXISTS `image`
     PRIMARY KEY (id),
     -- 分享短链：按码查图走它；同时防生成时撞码
     UNIQUE KEY uk_shareCode (shareCode),
+    -- 秒传：按指纹等值查重走它（普通索引 —— 多归属下同指纹多条记录合法，见 sql/12）
+    KEY idx_md5 (md5),
     -- 「我的图片」列表按 userId 过滤，必建
     KEY idx_userId (userId),
     -- 按名称搜索、按分类筛选
