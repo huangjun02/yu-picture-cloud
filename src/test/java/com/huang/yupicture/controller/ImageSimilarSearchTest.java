@@ -63,6 +63,15 @@ class ImageSimilarSearchTest {
     @Resource
     private ImageService imageService;
 
+    /** 图片查询多级缓存（测试直接插库绕过写路径，测试前必须清，理由同 ImageControllerTest） */
+    @Resource
+    private com.huang.yupicture.manager.ImageCacheManager imageCacheManager;
+
+    @org.junit.jupiter.api.BeforeEach
+    void clearImageCacheBeforeTest() {
+        imageCacheManager.clearForTest();
+    }
+
     @Resource
     private StringRedisTemplate stringRedisTemplate;
 
@@ -119,6 +128,7 @@ class ImageSimilarSearchTest {
         image.setUserId(userId);
         image.setReviewStatus(reviewStatus);
         imageService.save(image);
+        imageCacheManager.bumpVersion(); // 直接插库 = 模拟外部写，必须失效缓存（见 ImageControllerTest）
         return image.getId();
     }
 

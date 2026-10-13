@@ -12,6 +12,7 @@ import com.huang.yupicture.utils.PasswordUtils;
 import jakarta.annotation.Resource;
 import jakarta.servlet.http.Cookie;
 import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -69,6 +70,10 @@ class ImageControllerTest {
     @Resource
     private ImageService imageService;
 
+    /** 图片查询多级缓存（测试直接插库绕过写路径，测试前必须清，理由见 clearImageCache 注释） */
+    @Resource
+    private com.huang.yupicture.manager.ImageCacheManager imageCacheManager;
+
     @Resource
     private StringRedisTemplate stringRedisTemplate;
 
@@ -89,6 +94,16 @@ class ImageControllerTest {
         if (keys != null && !keys.isEmpty()) {
             stringRedisTemplate.delete(keys);
         }
+    }
+
+    /**
+     * 清图片查询缓存（多级缓存引入后必需）：本类测试直接用 prepareImage / imageService.save
+     * 插库，不经过 Service 写路径，版本号不会 bump —— 上一个测试留下的缓存条目会让
+     * 差值法（先查基数 → 插库 → 再查增量）读到旧缓存、增量恒为 0。
+     */
+    @BeforeEach
+    void clearImageCache() {
+        imageCacheManager.clearForTest();
     }
 
     // ==================== 测试数据准备 ====================
@@ -181,6 +196,10 @@ class ImageControllerTest {
         image.setUserId(userId);
         image.setReviewStatus(reviewStatus);
         imageService.save(image);
+        // 多级缓存（图片优化第二期）：直接插库模拟的就是一次「外部写」，写操作必须失效缓存 ——
+        // 差值法用例（先查基数 → 插库 → 再查增量）靠这一 bump 才能读到新数据。
+        // 与生产语义一致：绕过 Service 的写不会自动失效，谁写谁负责 bump
+        imageCacheManager.bumpVersion();
         return image.getId();
     }
 
@@ -1049,5 +1068,187 @@ class ImageControllerTest {
                 .andExpect(jsonPath("$.code").value(0));
         mockMvc.perform(post("/image/share/view").param("shareCode", "shareDeleted123"))
                 .andExpect(jsonPath("$.code").value(40400));
+    }
+
+    // ==================== 批量操作（部分成功语义） ====================
+
+    /** 调批量接口的通用入口，返回响应 JSON 根节点 */
+    private JsonNode postBatch(Cookie cookie, String path, String body) throws Exception {
+        MvcResult result = mockMvc.perform(post(path).cookie(cookie)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body))
+                .andReturn();
+        return objectMapper.readTree(result.getResponse().getContentAsString(StandardCharsets.UTF_8));
+    }
+
+    @Test
+    void batchDeleteShouldSucceedPartiallyAndKeepFailures() throws Exception {
+        long ownerId = prepareUser("img_b_owner1", "user");
+        Cookie cookie = loginAndGetCookie("img_b_owner1");
+        long id1 = prepareImage(ownerId, "批量删1", "风景");
+        long id2 = prepareImage(ownerId, "批量删2", "风景");
+
+        // 一批里混一条不存在的 id：成功的照常删，失败的原因带回 —— 部分成功语义
+        JsonNode resp = postBatch(cookie, "/image/batch/delete",
+                "{\"imageIds\":[\"" + id1 + "\",\"999999\",\"" + id2 + "\"]}");
+        assertEquals(0, resp.path("code").asInt(), "部分成功也应该返回成功（计数在 data 里）");
+        assertEquals(2, resp.path("data").path("successCount").asInt());
+        assertEquals(1, resp.path("data").path("failCount").asInt());
+        assertEquals("999999", resp.path("data").path("failures").get(0).path("imageId").asText());
+
+        // 真删掉了：逻辑删除后正常查询不可见
+        assertTrue(imageService.getById(id1) == null, "选中的图应被删除");
+        assertTrue(imageService.getById(id2) == null, "选中的图应被删除");
+    }
+
+    @Test
+    void batchDeleteShouldCountOthersImageAsFailureNotAbort() throws Exception {
+        long ownerId = prepareUser("img_b_owner2", "user");
+        long otherUserId = prepareUser("img_b_other2", "user");
+        Cookie otherCookie = loginAndGetCookie("img_b_other2");
+        long othersId = prepareImage(ownerId, "别人的图", "风景");
+        long mineId = prepareImage(otherUserId, "自己的图", "风景");
+
+        // 混入一条越权目标：这条算 fail（40101 语义收进 failures），不暴露存在性、也不中断整批
+        JsonNode resp = postBatch(otherCookie, "/image/batch/delete",
+                "{\"imageIds\":[\"" + othersId + "\",\"" + mineId + "\"]}");
+        assertEquals(0, resp.path("code").asInt());
+        assertEquals(1, resp.path("data").path("successCount").asInt());
+        assertEquals(1, resp.path("data").path("failCount").asInt());
+        assertEquals(othersId + "", resp.path("data").path("failures").get(0).path("imageId").asText());
+        assertTrue(resp.path("data").path("failures").get(0).path("reason").asText().contains("无权"));
+
+        assertTrue(imageService.getById(othersId) != null, "越权目标不能真的被删掉");
+        assertTrue(imageService.getById(mineId) == null, "自己的图应正常删除");
+    }
+
+    @Test
+    void batchDeleteShouldRequireLogin() throws Exception {
+        mockMvc.perform(post("/image/batch/delete")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"imageIds\":[\"1\"]}"))
+                .andExpect(jsonPath("$.code").value(40100));
+    }
+
+    @Test
+    void batchDeleteShouldRejectEmptyAndOversize() throws Exception {
+        long ownerId = prepareUser("img_b_owner3", "user");
+        Cookie cookie = loginAndGetCookie("img_b_owner3");
+
+        // 空列表 → 40000（前端没勾选就点了按钮）
+        assertEquals(40000, postBatch(cookie, "/image/batch/delete", "{\"imageIds\":[]}")
+                .path("code").asInt());
+
+        // 超过 100 → 40000 整批拒绝，不截断
+        StringBuilder ids = new StringBuilder("[");
+        for (int i = 0; i < 101; i++) {
+            if (i > 0) ids.append(",");
+            ids.append("\"").append(1000000 + i).append("\"");
+        }
+        ids.append("]");
+        assertEquals(40000, postBatch(cookie, "/image/batch/delete",
+                "{\"imageIds\":" + ids + "}").path("code").asInt());
+    }
+
+    @Test
+    void batchUpdateShouldAppendTagsAndSetCategory() throws Exception {
+        long ownerId = prepareUser("img_b_owner4", "user");
+        Cookie cookie = loginAndGetCookie("img_b_owner4");
+        long id1 = prepareImage(ownerId, "批量改1", "风景", new String[]{"测试"});
+        long id2 = prepareImage(ownerId, "批量改2", "风景", new String[]{"夜景", "测试"});
+
+        JsonNode resp = postBatch(cookie, "/image/batch/update",
+                "{\"imageIds\":[\"" + id1 + "\",\"" + id2 + "\"]," +
+                        "\"category\":\"城市\",\"appendTags\":[\"精选\",\"测试\"]}");
+        assertEquals(0, resp.path("code").asInt());
+        assertEquals(2, resp.path("data").path("successCount").asInt());
+
+        // category 覆盖；appendTags 追加进原有标签并整体去重（原标签保留）
+        Image img1 = imageService.getById(id1);
+        assertEquals("城市", img1.getCategory());
+        assertTrue(img1.getTags().contains("精选") && img1.getTags().contains("测试"), "追加 + 原有标签共存");
+        Image img2 = imageService.getById(id2);
+        assertTrue(img2.getTags().contains("夜景") && img2.getTags().contains("精选"), "原有标签不能被清掉");
+
+        // 用户自己批量编辑 → 审核状态退回待审核（与单条编辑同一规则）
+        assertEquals(ImageConstant.REVIEW_STATUS_PENDING, img1.getReviewStatus());
+    }
+
+    @Test
+    void batchUpdateByAdminShouldAutoPassAndKeepOthersTags() throws Exception {
+        long ownerId = prepareUser("img_b_owner5", "user");
+        prepareUser("img_b_admin5", "admin");
+        Cookie adminCookie = loginAndGetCookie("img_b_admin5");
+        long id1 = prepareImage(ownerId, "管理员批量改", "风景", new String[]{"测试"});
+
+        JsonNode resp = postBatch(adminCookie, "/image/batch/update",
+                "{\"imageIds\":[\"" + id1 + "\"],\"appendTags\":[\"官方\"]}");
+        assertEquals(0, resp.path("code").asInt());
+        assertEquals(1, resp.path("data").path("successCount").asInt());
+
+        // 管理员编辑 → 自动过审（与单条编辑一致）；category 没传 → 不改（PATCH 语义）
+        Image img = imageService.getById(id1);
+        assertEquals(ImageConstant.REVIEW_STATUS_PASS, img.getReviewStatus());
+        assertEquals("风景", img.getCategory(), "没传 category 就不该动分类");
+        assertTrue(img.getTags().contains("官方"));
+    }
+
+    @Test
+    void batchUpdateShouldRejectNoOpAndBlankTag() throws Exception {
+        long ownerId = prepareUser("img_b_owner6", "user");
+        Cookie cookie = loginAndGetCookie("img_b_owner6");
+        long id1 = prepareImage(ownerId, "批量改校验", "风景");
+
+        // category 与 appendTags 都没传 → 40000
+        assertEquals(40000, postBatch(cookie, "/image/batch/update",
+                "{\"imageIds\":[\"" + id1 + "\"]}").path("code").asInt());
+
+        // 追加空白标签 → 40000（明确传了坏值就明确报错）
+        assertEquals(40000, postBatch(cookie, "/image/batch/update",
+                "{\"imageIds\":[\"" + id1 + "\"],\"appendTags\":[\" \"]}").path("code").asInt());
+    }
+
+    @Test
+    void batchReviewShouldPassRejectAndRequireReasonUpfront() throws Exception {
+        long ownerId = prepareUser("img_b_owner7", "user");
+        prepareUser("img_b_admin7", "admin");
+        Cookie adminCookie = loginAndGetCookie("img_b_admin7");
+        Cookie ownerCookie = loginAndGetCookie("img_b_owner7");
+        long id1 = prepareImage(ownerId, "批量审1", "风景");
+        long id2 = prepareImage(ownerId, "批量审2", "风景");
+
+        // 拒绝缺原因 → 40000，且一条都不能被审掉（整批前置校验，不是审一半才炸）
+        JsonNode bad = postBatch(adminCookie, "/image/batch/review",
+                "{\"imageIds\":[\"" + id1 + "\",\"" + id2 + "\"],\"reviewStatus\":2}");
+        assertEquals(40000, bad.path("code").asInt());
+        assertEquals(ImageConstant.REVIEW_STATUS_PENDING, imageService.getById(id1).getReviewStatus(),
+                "前置校验失败时整批不该有任何写入");
+        assertEquals(ImageConstant.REVIEW_STATUS_PENDING, imageService.getById(id2).getReviewStatus());
+
+        // 拒绝带原因 → 全过，意见落库
+        JsonNode ok = postBatch(adminCookie, "/image/batch/review",
+                "{\"imageIds\":[\"" + id1 + "\",\"" + id2 + "\"],\"reviewStatus\":2," +
+                        "\"reviewMessage\":\"内容不符合规范\"}");
+        assertEquals(0, ok.path("code").asInt());
+        assertEquals(2, ok.path("data").path("successCount").asInt());
+        assertEquals(ImageConstant.REVIEW_STATUS_REJECT, imageService.getById(id1).getReviewStatus());
+        assertEquals("内容不符合规范", imageService.getById(id2).getReviewMessage());
+
+        // 改判通过也支持（状态机与单条一致）
+        postBatch(adminCookie, "/image/batch/review",
+                "{\"imageIds\":[\"" + id1 + "\"],\"reviewStatus\":1}");
+        assertEquals(ImageConstant.REVIEW_STATUS_PASS, imageService.getById(id1).getReviewStatus());
+    }
+
+    @Test
+    void batchReviewShouldRequireAdmin() throws Exception {
+        long ownerId = prepareUser("img_b_owner8", "user");
+        Cookie cookie = loginAndGetCookie("img_b_owner8");
+        long id1 = prepareImage(ownerId, "普通用户不能批量审", "风景");
+
+        JsonNode resp = postBatch(cookie, "/image/batch/review",
+                "{\"imageIds\":[\"" + id1 + "\"],\"reviewStatus\":1}");
+        assertEquals(40101, resp.path("code").asInt());
+        assertEquals(ImageConstant.REVIEW_STATUS_PENDING, imageService.getById(id1).getReviewStatus());
     }
 }
