@@ -3,11 +3,15 @@ package com.huang.yupicture.controller;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.huang.yupicture.common.BaseResponse;
 import com.huang.yupicture.common.ResultUtils;
+import com.huang.yupicture.model.dto.image.ImageBatchDeleteRequest;
+import com.huang.yupicture.model.dto.image.ImageBatchReviewRequest;
+import com.huang.yupicture.model.dto.image.ImageBatchUpdateRequest;
 import com.huang.yupicture.model.dto.image.ImageDownloadResult;
 import com.huang.yupicture.model.dto.image.ImageCrawlRequest;
 import com.huang.yupicture.model.dto.image.ImageQueryRequest;
 import com.huang.yupicture.model.dto.image.ImageReviewRequest;
 import com.huang.yupicture.model.dto.image.ImageUpdateRequest;
+import com.huang.yupicture.model.vo.ImageBatchResultVO;
 import com.huang.yupicture.model.vo.ImageCrawlResultVO;
 import com.huang.yupicture.model.vo.ImageOptionsVO;
 import com.huang.yupicture.model.vo.ImageVO;
@@ -218,6 +222,43 @@ public class ImageController {
     @Operation(summary = "删除图片（本人或管理员）")
     public BaseResponse<Boolean> deleteImage(@RequestParam String id) {
         return ResultUtils.success(imageService.deleteImage(id));
+    }
+
+    /**
+     * 批量删除图片（本人或管理员）。
+     *
+     * <p>与单条删除的分工：单条走 URL 参数，批量走请求体（id 集合是「多字段」语义）。
+     * 部分成功语义 —— 一条失败不中断整批，成功 / 失败计数与失败明细一并返回，
+     * 前端按数量提示（「成功 8 张、失败 2 张」），不弹一个笼统的「失败」。
+     */
+    @PostMapping("/batch/delete")
+    @Operation(summary = "批量删除图片（本人或管理员，部分成功）")
+    public BaseResponse<ImageBatchResultVO> batchDeleteImages(@RequestBody ImageBatchDeleteRequest request) {
+        return ResultUtils.success(imageService.batchDeleteImages(request));
+    }
+
+    /**
+     * 批量编辑图片的分类 / 追加标签（本人或管理员）。
+     *
+     * <p>category 是「设置」（覆盖），appendTags 是「追加」（并入现有标签去重）——
+     * 两个语义刻意分开：批量覆盖标签会清掉逐张精心打的标签，那不是批量操作该干的事。
+     */
+    @PostMapping("/batch/update")
+    @Operation(summary = "批量编辑图片分类/追加标签（本人或管理员，部分成功）")
+    public BaseResponse<ImageBatchResultVO> batchUpdateImages(@RequestBody ImageBatchUpdateRequest request) {
+        return ResultUtils.success(imageService.batchUpdateImages(request));
+    }
+
+    /**
+     * 批量审核图片（管理员）。
+     *
+     * <p>「拒绝必填原因」这类整批校验在进循环之前完成 —— 入参问题不该审到一半才报。
+     * 逐条复用单条审核的状态机与重置开关，行为与单条审核完全一致。
+     */
+    @PostMapping("/batch/review")
+    @Operation(summary = "批量审核图片（管理员，部分成功）")
+    public BaseResponse<ImageBatchResultVO> batchReviewImages(@RequestBody ImageBatchReviewRequest request) {
+        return ResultUtils.success(imageService.batchReviewImages(request));
     }
 
     /**

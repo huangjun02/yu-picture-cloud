@@ -2,10 +2,14 @@ package com.huang.yupicture.service;
 
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.baomidou.mybatisplus.spring.service.IService;
+import com.huang.yupicture.model.dto.image.ImageBatchDeleteRequest;
+import com.huang.yupicture.model.dto.image.ImageBatchReviewRequest;
+import com.huang.yupicture.model.dto.image.ImageBatchUpdateRequest;
 import com.huang.yupicture.model.dto.image.ImageDownloadResult;
 import com.huang.yupicture.model.dto.image.ImageQueryRequest;
 import com.huang.yupicture.model.dto.image.ImageUpdateRequest;
 import com.huang.yupicture.model.entity.Image;
+import com.huang.yupicture.model.vo.ImageBatchResultVO;
 import com.huang.yupicture.model.vo.ImageOptionsVO;
 import com.huang.yupicture.model.vo.ImageVO;
 import org.springframework.web.multipart.MultipartFile;
@@ -184,4 +188,57 @@ public interface ImageService extends IService<Image> {
      * 筛选项必须从真实数据来，否则"能筛"是假的。
      */
     ImageOptionsVO listOptions();
+
+    // ==================== 批量操作 ====================
+
+    /**
+     * 批量操作的单次上限。
+     *
+     * <p>同步接口不做异步任务队列：列表分页每页 ≤ 20，勾满几页就到顶了；
+     * 上限是防呆（前端 bug 传来一万条把请求拖死），不是真实业务约束。
+     * 超限整体报参数错误，不截断 —— 「你选了 120 张却只删了 100 张」的静默丢行为
+     * 比明确拒绝危险得多。
+     */
+    int BATCH_MAX_SIZE = 100;
+
+    /**
+     * 批量删除图片（本人或管理员，逐条归属校验）。
+     *
+     * <p>逐条复用 {@link #deleteImage(String)}：COS 清理顺序（先文件后记录、
+     * 缩略图/WebP 尽力而为）与单条删除完全一致，不另写一份。
+     *
+     * <p><b>部分成功语义</b>：一条失败（不存在 / 越权 / id 非法）不中断整批，
+     * 失败原因逐条带回。不开事务回滚 —— COS 文件删除无法回滚，「回滚」只会制造
+     * 记录还在、文件没了的更糟状态。
+     *
+     * @return 成功 / 失败计数与失败明细
+     * @throws com.huang.yupicture.common.BusinessException 未登录（40100）；
+     *                                                      列表为空或超过 {@link #BATCH_MAX_SIZE}（40000）
+     */
+    ImageBatchResultVO batchDeleteImages(ImageBatchDeleteRequest request);
+
+    /**
+     * 批量编辑图片的分类 / 追加标签（本人或管理员，逐条归属校验）。
+     *
+     * <p>category 是「设置」语义（覆盖），appendTags 是「追加」语义
+     * （并入现有标签后整体去重，不清掉原有的）。与单条编辑一致，
+     * 编辑会让审核状态重新走一遍（管理员改 → 自动过审；用户改 → 退回待审核）。
+     *
+     * @throws com.huang.yupicture.common.BusinessException 未登录（40100）；
+     *                                                      列表为空 / 超限 / category 与 appendTags 都没传 /
+     *                                                      appendTags 含空白标签（40000）
+     */
+    ImageBatchResultVO batchUpdateImages(ImageBatchUpdateRequest request);
+
+    /**
+     * 批量审核图片（管理员）。
+     *
+     * <p>逐条复用 {@link #reviewImage}（状态机 / 重置开关 / 审核参数补齐一字不差）。
+     * 「拒绝必填原因」在进循环之前整批校验 —— 原因缺失报参数错误，
+     * 不该审到一半才发现白跑一趟。
+     *
+     * @throws com.huang.yupicture.common.BusinessException 非管理员（40101）；未登录（40100）；
+     *                                                      列表为空 / 超限 / 状态非法 / 拒绝缺原因（40000）
+     */
+    ImageBatchResultVO batchReviewImages(ImageBatchReviewRequest request);
 }

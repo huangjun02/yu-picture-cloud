@@ -10,6 +10,7 @@ import com.huang.yupicture.common.ErrorCode;
 import com.huang.yupicture.constant.ImageConstant;
 import com.huang.yupicture.constant.UserConstant;
 import com.huang.yupicture.manager.CosManager;
+import com.huang.yupicture.manager.ImageCacheManager;
 import com.huang.yupicture.manager.OutboundHttpClient;
 import com.huang.yupicture.mapper.ImageMapper;
 import com.huang.yupicture.model.dto.image.ImageBatchDeleteRequest;
@@ -87,6 +88,15 @@ public class ImageServiceImpl extends ServiceImpl<ImageMapper, Image> implements
     @Resource
     private OutboundHttpClient outboundHttpClient;
 
+    /**
+     * 图片查询多级缓存（图片优化第二期）。
+     *
+     * <p>只服务「浏览视角」的读路径；写路径统一在方法末尾 bump 版本号失效。
+     * 设计与取舍见 {@link ImageCacheManager} 类注释。
+     */
+    @Resource
+    private ImageCacheManager imageCacheManager;
+
     /** 分享码字符表（Base62：字母大小写 + 数字） */
     private static final char[] SHARE_CODE_ALPHABET =
             "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789".toCharArray();
@@ -126,6 +136,19 @@ public class ImageServiceImpl extends ServiceImpl<ImageMapper, Image> implements
         // 分页加固统一走 PageRequest 的两个方法（逻辑与 user 模块共用一份）
         long pageNum = imageQueryRequest.resolvePageNum();
         long pageSize = imageQueryRequest.resolvePageSize();
+
+        // ========== 多级缓存（图片优化第二期）==========
+        // 只缓存「浏览视角」（非管理员 + 非查自己的图）：这个视角服务端钉死只看已通过，
+        // 结果与登录的是谁无关，key 不掺身份。「我的图片」/管理员视角不缓存（每人一份 + 状态私密）。
+        boolean cacheable = !isAdmin(loginUser)
+                && (ParamUtils.isBlank(imageQueryRequest.getUserId())
+                || !loginUser.getId().equals(ParamUtils.parseId(imageQueryRequest.getUserId())));
+        if (cacheable) {
+            Page<ImageVO> cached = imageCacheManager.get(imageQueryRequest);
+            if (cached != null) {
+                return cached;
+            }
+        }
 
         LambdaQueryWrapper<Image> wrapper = new LambdaQueryWrapper<>();
 
@@ -173,6 +196,11 @@ public class ImageServiceImpl extends ServiceImpl<ImageMapper, Image> implements
                 .map(this::toImageVO)
                 .collect(Collectors.toList());
         imageVoPage.setRecords(voList);
+
+        // 回源后写入缓存（cacheable 视角）：下次同条件查询直接命中 C1/C2
+        if (cacheable) {
+            imageCacheManager.put(imageQueryRequest, imageVoPage);
+        }
         return imageVoPage;
     }
 
@@ -222,6 +250,8 @@ public class ImageServiceImpl extends ServiceImpl<ImageMapper, Image> implements
         if (!result) {
             throw new BusinessException(ErrorCode.OPERATION_ERROR, "更新失败");
         }
+        // 编辑改变内容 / 审核状态 → 图墙缓存失效（版本号 +1，旧 key 全作废）
+        imageCacheManager.bumpVersion();
         log.info("编辑图片：id={}, 操作人id={}, 审核状态重置为={}", imageId, loginUser.getId(),
                 isAdmin(loginUser) ? "自动过审" : "待审核");
         return true;
@@ -313,7 +343,7 @@ public class ImageServiceImpl extends ServiceImpl<ImageMapper, Image> implements
                 ? request.getAppendTags().stream().map(String::trim).distinct().toList()
                 : null;
 
-        return runBatch(ids, rawId -> {
+        ImageBatchResultVO result = runBatch(ids, rawId -> {
             long imageId = ParamUtils.parseId(rawId);
             Image oldImage = this.getById(imageId);
             if (oldImage == null) {
@@ -334,8 +364,7 @@ public class ImageServiceImpl extends ServiceImpl<ImageMapper, Image> implements
                 }
             }
 
-            // 复用单条编辑的写入模式：新空对象 + 显式 set（PATCH 语义），
-            // name / introduction / url / userId 一概不碰
+            // 复用单条编辑的写入模式：新空对象 + 显式 set（PATCH 语义），name / introduction / url / userId 一概不碰
             Image image = new Image();
             image.setId(imageId);
             image.setCategory(category);
@@ -356,6 +385,12 @@ public class ImageServiceImpl extends ServiceImpl<ImageMapper, Image> implements
                 throw new BusinessException(ErrorCode.OPERATION_ERROR, "更新失败");
             }
         });
+        // 批量编辑的缓存失效收口成一次 bump：逐条 bump 100 次没有意义，整批完成后统一作废
+        // （部分成功也成立——只要真有记录被改了，图墙内容就可能变，bump 本身是幂等的）
+        if (result.getSuccessCount() > 0) {
+            imageCacheManager.bumpVersion();
+        }
+        return result;
     }
 
     @Override
@@ -455,6 +490,8 @@ public class ImageServiceImpl extends ServiceImpl<ImageMapper, Image> implements
         if (!result) {
             throw new BusinessException(ErrorCode.OPERATION_ERROR, "删除失败");
         }
+        // 删除改变图墙内容 → 缓存失效
+        imageCacheManager.bumpVersion();
         log.info("删除图片：id={}, 操作人id={}", imageId, loginUser.getId());
         return true;
     }
@@ -923,6 +960,11 @@ public class ImageServiceImpl extends ServiceImpl<ImageMapper, Image> implements
 
         log.info("上传图片成功：imageId={}, userId={}, size={}字节",
                 image.getId(), loginUser.getId(), image.getPicSize());
+        // 缓存失效只在「上图墙」时需要：管理员上传自动过审直接进浏览视角；普通用户上传是
+        // 待审核、图墙看不见，不需要为此作废全站缓存（无谓的 bump 会平白拉低命中率）
+        if (isAdmin(loginUser)) {
+            imageCacheManager.bumpVersion();
+        }
         return toImageVO(image);
     }
 
@@ -1133,6 +1175,8 @@ public class ImageServiceImpl extends ServiceImpl<ImageMapper, Image> implements
         if (!result) {
             throw new BusinessException(ErrorCode.OPERATION_ERROR, "审核失败");
         }
+        // 审核结论决定图在不在图墙上（通过→上墙，拒绝→下墙）→ 缓存失效
+        imageCacheManager.bumpVersion();
         log.info("图片审核完成：imageId={}, result={}, reviewerId={}, resetParams={}",
                 imageId, reviewStatus == ImageConstant.REVIEW_STATUS_PASS ? "通过" : "拒绝",
                 reviewer.getId(), reset);

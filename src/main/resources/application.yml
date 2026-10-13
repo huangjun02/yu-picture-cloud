@@ -45,6 +45,13 @@ mybatis-plus:
     # 源码位置：TableInfo#underCamel = configuration.isMapUnderscoreToCamelCase()
     #           TableInfoHelper: if (underCamel) column = StringUtils.camelToUnderline(column)
     map-underscore-to-camel-case: false
+    # 一级缓存作用域改 statement（默认 SESSION）：多级缓存落地（图片优化第二期）时踩到的真坑——
+    #   SESSION 作用域下同一 SqlSession 里「完全相同 SQL」的第二次查询直接返回第一次的结果，
+    #   绕过了所有应用层缓存与数据库：失效策略再正确也管不到它（它不清、也感知不到别处的写）。
+    #   Spring 集成里 SqlSession 与事务绑定，事务越长这个「幽灵缓存」活越久。
+    #   statement 作用域 = 每次查询执行完就清一级缓存，语义是「同一条 SQL 只信任一次」；
+    #   性能影响可忽略（本项目热点查询有自己的 Redis/C1 两层，轮不到一级缓存建功）。
+    local-cache-scope: statement
   global-config:
     db-config:
       # 逻辑删除：不真删数据，只把 isDelete 从 0 改成 1
